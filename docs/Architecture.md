@@ -78,7 +78,13 @@ isolation with mocked Graph cmdlets.
    `Excluded`, or `ManualReview`, plus a machine-readable `ReasonCode`.
 4. The lifecycle state file records when each disabled Entra object was first
    observed. Reports are written before any confirmation prompt is shown.
-5. If changes are permitted, active stale candidates remove Autopilot when
+5. If the `-ScrappedDeviceCsvPath` workflow is enabled, `Resolve-ScrappedDeviceRecords`
+   correlates the CSV serials against the already-discovered Entra/Intune/Autopilot
+   sets without issuing extra Graph calls. When a serial exists in Autopilot,
+   the row set is expanded to include every related Entra and Intune object for
+   that same serial; otherwise duplicate serials remain `Ambiguous` and are left
+   untouched.
+6. If changes are permitted, active stale candidates remove Autopilot when
    applicable and then disable Entra. Disabled candidates are removed only
    after `DaysDisabled` has elapsed. A Graph `AlreadyDeleted` response
    confirms the Autopilot step; repeated `DeletionInProgress` responses block

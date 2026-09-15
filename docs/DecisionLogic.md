@@ -73,6 +73,28 @@ deletion**. Windows devices with a Medium/Low-confidence Autopilot match are
 routed to manual review (`ReasonCode = LowConfidenceMatch`) rather than
 deleted.
 
+## Scrapped-device serial matching
+
+The `-ScrappedDeviceCsvPath` workflow is intentionally independent from the
+stale-device activity evaluation. It takes the CSV serials as the authoritative
+input and resolves them only against the already-discovered Entra, Intune, and
+Autopilot records.
+
+- If a serial exists in Windows Autopilot, Autopilot is treated as the
+  authority for that serial.
+- In that case, the script expands the match to every related Entra and Intune
+  object already linked to the same serial and emits one row per actual object
+  being removed.
+- If there are multiple matches but no Autopilot authority, the serial is marked
+  `Ambiguous` and excluded from deletion.
+- If no match is found in any source, the row is marked `NotFound` and no
+  deletion is attempted.
+
+This rule ensures that a CSV containing a serial that is present in Autopilot
+never produces a misleading tenant-wide summary or a mixed-platform count.
+Instead, the scrapped-device summary shows the exact deletion targets for the
+serial that was supplied.
+
 ## Decision precedence (evaluated in order per device)
 
 1. `Server` / `Unsupported` platform → **Excluded** (`UnsupportedPlatform`)

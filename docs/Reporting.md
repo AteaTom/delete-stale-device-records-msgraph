@@ -16,7 +16,7 @@ by `Export-ReportCsv`). Every row includes the run's `RunId`.
 | `AmbiguousMatches.csv` | Subset with `MatchStatus = Ambiguous` |
 | `ExcludedDevices.csv` | Subset with `Decision = Excluded` |
 | `ErrorDevices.csv` | Subset with a non-null `ErrorMessage` |
-| `ScrappedDeviceResults.csv` | One row per serial number from `-ScrappedDeviceCsvPath`, with match/removal status per source; empty (headers only) when the parameter is not supplied |
+| `ScrappedDeviceResults.csv` | One row per actual object to remove for each serial from `-ScrappedDeviceCsvPath`, expanded when a serial is Autopilot-authoritative; empty (headers only) when the parameter is not supplied |
 | `RunSummary.json` | Machine-readable run outcome (counts, exit code, timestamps) |
 | `ExecutionLog.txt` | Human-readable structured log (DEBUG/INFO/WARNING/ERROR/SUCCESS) |
 
@@ -49,7 +49,14 @@ counts at planning and completion.
 `EntraDeviceName`, and per-target `AutopilotRemovalStatus`,
 `IntuneRemovalStatus`, `EntraRemovalStatus` (`Removed`, `AlreadyRemoved`,
 `RemovalUnconfirmed`, `SkippedAutopilotNotRemoved`, `WhatIf`, `Skipped`,
-`NotApplicable`, `NotAttempted`). Only `Matched` rows are ever acted on.
+`NotApplicable`, `NotAttempted`).
+
+When a serial exists in Autopilot, the script expands the serial to include
+all related Entra and Intune objects for that same serial, so the report is the
+exact object set that will be deleted. When no Autopilot authority exists,
+only unambiguous single matches are reported as `Matched`; duplicate serials
+without Autopilot authority remain `Ambiguous` and are never acted on.
+Only `Matched` rows are ever acted on.
 
 ## Reason codes
 

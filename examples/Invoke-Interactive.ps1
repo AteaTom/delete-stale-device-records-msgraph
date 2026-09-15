@@ -9,6 +9,9 @@ Set-Location -LiteralPath (Split-Path -Parent $PSScriptRoot)
 
 # Add -ScrappedDeviceCsvPath '.\src\SkrotadeDatorer.csv' to also remove Autopilot,
 # Intune, and Entra records for physically scrapped devices listed by serial number.
+# When the serial exists in Autopilot, all linked Entra and Intune records for that
+# serial are expanded into the exact deletion set; duplicates without Autopilot
+# authority remain Ambiguous and are skipped.
 & '.\src\Invoke-StaleDeviceCleanup.ps1' `
     -Mode Interactive `
     -DaysInactive 365 `

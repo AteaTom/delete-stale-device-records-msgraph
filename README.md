@@ -79,6 +79,13 @@ are exported to `AmbiguousMatches.csv`. Only High-confidence Autopilot matches
 are eligible for automatic Autopilot deletion. See
 [docs/DecisionLogic.md](docs/DecisionLogic.md).
 
+For the scrapped-device CSV workflow, the serial-number list is treated as the
+authoritative input. If a serial exists in Windows Autopilot, all Entra and
+Intune objects linked to that serial are included in the exact deletion set,
+not only the first matching record. This prevents a CSV-based Autopilot serial
+from being treated as a mixed-platform summary or as a single object when the
+serial actually maps to multiple tenant records.
+
 ## Autopilot-first deletion order
 
 For each Windows lifecycle candidate with a High-confidence Autopilot match:
@@ -180,14 +187,21 @@ even if it would otherwise be excluded as "recent activity detected":
 ```
 
 Every serial number that resolves to a Windows Autopilot identity, an Intune
-managed device, and/or an Entra device object is removed from all three —
-regardless of activity, disabled-state, or platform. A serial number matching
-more than one record in any single source is reported as `Ambiguous` and left
-untouched; a serial number matching nothing is reported as `NotFound`. This
-is the only workflow in the project that removes Intune managed-device
+managed device, and/or an Entra device object is removed from all relevant
+objects in those systems — regardless of activity, disabled-state, or
+platform. If the serial exists in Autopilot, Autopilot is treated as the
+authoritative source and all related Entra/Intune records for that serial are
+expanded into the exact deletion set. Duplicate serials without Autopilot
+authority remain `Ambiguous` and are left untouched; a serial matching
+nothing is reported as `NotFound`.
+
+This is the only workflow in the project that removes Intune managed-device
 records, and it only ever acts on the serial numbers you explicitly listed.
 It follows the same Mode/`-WhatIf`/`-ConfirmDeletion` gating, and the same
-Autopilot-before-Entra safety order, as the rest of the tool.
+Autopilot-before-Entra safety order, as the rest of the tool. The
+`ScrappedDeviceResults.csv` report is structured to show the exact objects that
+will be removed for each serial, not a tenant-wide summary that mixes in other
+stale-device candidates.
 
 ## Protected-device configuration
 

@@ -19,6 +19,15 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Make the scrapped-device CSV workflow Autopilot-authoritative: when a serial
+  exists in Windows Autopilot, every related Intune and Entra object for that
+  serial is expanded into the exact deletion set, and duplicate serials without
+  Autopilot authority remain `Ambiguous` and are skipped.
+- Ensure `ScrappedDeviceResults.csv` and the scrapped-device summary report the
+  exact objects that will be removed, rather than a misleading tenant-wide
+  stale-device summary.
+- Deduplicate repeated matches so the same object is not reported or deleted
+  multiple times in the same scrapped-device run.
 - Replace direct Entra deletion for newly stale devices with a two-stage
   lifecycle: stale active objects are disabled first, then removed only after
   `-DaysDisabled` days have elapsed. The disable timestamps are persisted in

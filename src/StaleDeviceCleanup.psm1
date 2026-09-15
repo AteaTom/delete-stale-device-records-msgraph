@@ -1068,6 +1068,18 @@ function Resolve-ScrappedDeviceRecords {
     }
 
     $results = [System.Collections.Generic.List[object]]::new()
+    $getSafeValue = {
+        param(
+            [AllowNull()]$Object,
+            [Parameter(Mandatory)][string]$PropertyName
+        )
+
+        if ($null -eq $Object) { return $null }
+        if ($Object.PSObject.Properties.Name -contains $PropertyName) {
+            return $Object.$PropertyName
+        }
+        return $null
+    }
 
     foreach ($inputSerial in $SerialNumbers) {
         $normalized = ConvertTo-NormalizedSerialNumber -SerialNumber $inputSerial
@@ -1103,16 +1115,99 @@ function Resolve-ScrappedDeviceRecords {
             }
         }
 
+        if ($autopilotMatches.Count -gt 0) {
+            # If the serial exists in Autopilot, Autopilot is the authoritative source.
+            # Emit one row per unique object that belongs to the serial so the reports
+            # reflect the exact set of records that will be removed.
+            $matchStatus = 'Matched'
+            $ambiguityReason = $null
+            $rowsByKey = [System.Collections.Generic.Dictionary[string, object]]::new()
+            $autopilotEnrollmentState = $null
+            if ($autopilotMatches.Count -gt 0 -and $autopilotMatches[0].PSObject.Properties['EnrollmentState']) {
+                $autopilotEnrollmentState = $autopilotMatches[0].EnrollmentState
+            }
+
+            foreach ($autopilotMatch in @($autopilotMatches | Select-Object -Unique -Property Id)) {
+                $row = [PSCustomObject][ordered]@{
+                    RunId                    = $RunId
+                    InputSerialNumber        = $inputSerial
+                    NormalizedSerialNumber   = $normalized
+                    MatchStatus              = 'Matched'
+                    AmbiguityReason          = $null
+                    AutopilotIdentityId      = $autopilotMatch.Id
+                    AutopilotEnrollmentState = if ($autopilotMatch.PSObject.Properties['EnrollmentState']) { $autopilotMatch.EnrollmentState } else { $autopilotEnrollmentState }
+                    IntuneManagedDeviceId    = $null
+                    IntuneDeviceName         = $null
+                    EntraObjectId            = $null
+                    EntraDeviceName          = $null
+                    AutopilotRemovalStatus   = 'NotAttempted'
+                    IntuneRemovalStatus      = 'NotAttempted'
+                    EntraRemovalStatus       = 'NotAttempted'
+                    ErrorMessage             = $null
+                }
+                $rowKey = [string]::Join('|', @('Autopilot', $row.AutopilotIdentityId))
+                if (-not $rowsByKey.ContainsKey($rowKey)) { $rowsByKey[$rowKey] = $row }
+            }
+
+            $uniqueIntuneMatches = @($intuneMatches | Select-Object -Unique -Property Id)
+            foreach ($intuneMatch in $uniqueIntuneMatches) {
+                $row = [PSCustomObject][ordered]@{
+                    RunId                    = $RunId
+                    InputSerialNumber        = $inputSerial
+                    NormalizedSerialNumber   = $normalized
+                    MatchStatus              = 'Matched'
+                    AmbiguityReason          = $null
+                    AutopilotIdentityId      = if ($autopilotMatches.Count -gt 0) { $autopilotMatches[0].Id } else { $null }
+                    AutopilotEnrollmentState = $autopilotEnrollmentState
+                    IntuneManagedDeviceId    = $intuneMatch.Id
+                    IntuneDeviceName         = & $getSafeValue $intuneMatch 'DeviceName'
+                    EntraObjectId            = $null
+                    EntraDeviceName          = $null
+                    AutopilotRemovalStatus   = 'NotAttempted'
+                    IntuneRemovalStatus      = 'NotAttempted'
+                    EntraRemovalStatus       = 'NotAttempted'
+                    ErrorMessage             = $null
+                }
+                $rowKey = [string]::Join('|', @('Intune', $row.IntuneManagedDeviceId))
+                if (-not $rowsByKey.ContainsKey($rowKey)) { $rowsByKey[$rowKey] = $row }
+            }
+
+            $uniqueEntraMatches = @($entraMatches | Select-Object -Unique -Property Id)
+            foreach ($entraMatch in $uniqueEntraMatches) {
+                $row = [PSCustomObject][ordered]@{
+                    RunId                    = $RunId
+                    InputSerialNumber        = $inputSerial
+                    NormalizedSerialNumber   = $normalized
+                    MatchStatus              = 'Matched'
+                    AmbiguityReason          = $null
+                    AutopilotIdentityId      = if ($autopilotMatches.Count -gt 0) { $autopilotMatches[0].Id } else { $null }
+                    AutopilotEnrollmentState = $autopilotEnrollmentState
+                    IntuneManagedDeviceId    = $null
+                    IntuneDeviceName         = $null
+                    EntraObjectId            = $entraMatch.Id
+                    EntraDeviceName          = & $getSafeValue $entraMatch 'DisplayName'
+                    AutopilotRemovalStatus   = 'NotAttempted'
+                    IntuneRemovalStatus      = 'NotAttempted'
+                    EntraRemovalStatus       = 'NotAttempted'
+                    ErrorMessage             = $null
+                }
+                $rowKey = [string]::Join('|', @('Entra', $row.EntraObjectId))
+                if (-not $rowsByKey.ContainsKey($rowKey)) { $rowsByKey[$rowKey] = $row }
+            }
+
+            foreach ($row in $rowsByKey.Values) { $results.Add($row) }
+            continue
+        }
+
         $matchStatus = 'NotFound'
         $ambiguityReason = $null
-        if ($autopilotMatches.Count -gt 1 -or $intuneMatches.Count -gt 1 -or $entraMatches.Count -gt 1) {
+        if ($intuneMatches.Count -gt 1 -or $entraMatches.Count -gt 1) {
             $matchStatus = 'Ambiguous'
             $ambiguityReason = 'DuplicateSerialNumber'
-        } elseif ($autopilotMatches.Count -eq 1 -or $intuneMatches.Count -eq 1 -or $entraMatches.Count -eq 1) {
+        } elseif ($intuneMatches.Count -eq 1 -or $entraMatches.Count -eq 1) {
             $matchStatus = 'Matched'
         }
 
-        $autopilotMatch = if ($autopilotMatches.Count -eq 1) { $autopilotMatches[0] } else { $null }
         $intuneMatch = if ($intuneMatches.Count -eq 1) { $intuneMatches[0] } else { $null }
         $entraMatch = if ($entraMatches.Count -eq 1) { $entraMatches[0] } else { $null }
 
@@ -1122,12 +1217,12 @@ function Resolve-ScrappedDeviceRecords {
             NormalizedSerialNumber   = $normalized
             MatchStatus              = $matchStatus
             AmbiguityReason          = $ambiguityReason
-            AutopilotIdentityId      = if ($autopilotMatch) { $autopilotMatch.Id } else { $null }
-            AutopilotEnrollmentState = if ($autopilotMatch) { $autopilotMatch.EnrollmentState } else { $null }
+            AutopilotIdentityId      = $null
+            AutopilotEnrollmentState = $null
             IntuneManagedDeviceId    = if ($intuneMatch) { $intuneMatch.Id } else { $null }
-            IntuneDeviceName         = if ($intuneMatch) { $intuneMatch.DeviceName } else { $null }
+            IntuneDeviceName         = if ($intuneMatch) { & $getSafeValue $intuneMatch 'DeviceName' } else { $null }
             EntraObjectId            = if ($entraMatch) { $entraMatch.Id } else { $null }
-            EntraDeviceName          = if ($entraMatch) { $entraMatch.DisplayName } else { $null }
+            EntraDeviceName          = if ($entraMatch) { & $getSafeValue $entraMatch 'DisplayName' } else { $null }
             AutopilotRemovalStatus   = 'NotAttempted'
             IntuneRemovalStatus      = 'NotAttempted'
             EntraRemovalStatus       = 'NotAttempted'
@@ -1276,7 +1371,15 @@ function Invoke-ScrappedDeviceRemoval {
         [int]$AutopilotDeletionRetryDelaySeconds = 30
     )
 
+    $seenKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($record in @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'Matched')) {
+        $autopilotKey = if ($record.AutopilotIdentityId) { $record.AutopilotIdentityId } else { 'none' }
+        $intuneKey = if ($record.IntuneManagedDeviceId) { $record.IntuneManagedDeviceId } else { 'none' }
+        $entraKey = if ($record.EntraObjectId) { $record.EntraObjectId } else { 'none' }
+        $dedupeKey = "autopilot|$autopilotKey|intune|$intuneKey|entra|$entraKey"
+        if ($seenKeys.Contains($dedupeKey)) { continue }
+        $seenKeys.Add($dedupeKey) | Out-Null
+
         try {
             $autopilotBlocking = $false
 

@@ -50,27 +50,42 @@ Describe 'Resolve-ScrappedDeviceRecords' {
         $result = Resolve-ScrappedDeviceRecords -SerialNumbers @('5CD3271HSD') -EntraDevices @($script:entraDevice) `
             -IntuneDevices @($script:intuneDevice) -AutopilotDevices @($script:autopilotDevice) -RunId 'r1'
 
-        $result[0].MatchStatus | Should -Be 'Matched'
-        $result[0].AutopilotIdentityId | Should -Be 'ap1'
-        $result[0].IntuneManagedDeviceId | Should -Be 'intune1'
-        $result[0].EntraObjectId | Should -Be 'entra1'
+        $result | Should -Not -BeNullOrEmpty
+        ($result | Where-Object { $_.MatchStatus -eq 'Matched' } | Select-Object -ExpandProperty AutopilotIdentityId | Sort-Object -Unique) | Should -Be @('ap1')
+        ($result | Where-Object { $_.IntuneManagedDeviceId } | Select-Object -ExpandProperty IntuneManagedDeviceId | Sort-Object -Unique) | Should -Be @('intune1')
+        ($result | Where-Object { $_.EntraObjectId } | Select-Object -ExpandProperty EntraObjectId | Sort-Object -Unique) | Should -Be @('entra1')
     }
 
     It 'is case-insensitive when matching the input serial number' {
         $result = Resolve-ScrappedDeviceRecords -SerialNumbers @('5cd3271hsd') -EntraDevices @($script:entraDevice) `
             -IntuneDevices @($script:intuneDevice) -AutopilotDevices @($script:autopilotDevice) -RunId 'r1'
 
-        $result[0].MatchStatus | Should -Be 'Matched'
+        ($result | Where-Object { $_.MatchStatus -eq 'Matched' }).Count | Should -BeGreaterThan 0
     }
 
-    It 'flags a duplicate serial number as Ambiguous and never selects a single match' {
-        $duplicateAutopilot = [PSCustomObject]@{ Id = 'ap2'; AzureActiveDirectoryDeviceId = 'aad-device-2'; ManagedDeviceId = $null; SerialNumber = '5CD3271HSD'; EnrollmentState = 'enrolled' }
+    It 'returns every related Entra and Intune object for a serial that exists in Autopilot' {
+        $entraDeviceTwo = New-TestEntraDevice -Id 'entra2' -DeviceId 'aad-device-2' -DisplayName 'SCRAPPED-02'
+        $intuneDeviceTwo = [PSCustomObject]@{ Id = 'intune2'; AzureAdDeviceId = 'aad-device-2'; SerialNumber = '5CD3271HSD'; DeviceName = 'SCRAPPED-02' }
+        $autopilotDevice = [PSCustomObject]@{ Id = 'ap1'; AzureActiveDirectoryDeviceId = 'aad-device-1'; ManagedDeviceId = 'intune1'; SerialNumber = '5CD3271HSD'; EnrollmentState = 'enrolled' }
+
+        $result = Resolve-ScrappedDeviceRecords -SerialNumbers @('5CD3271HSD') -EntraDevices @($script:entraDevice, $entraDeviceTwo) `
+            -IntuneDevices @($script:intuneDevice, $intuneDeviceTwo) -AutopilotDevices @($autopilotDevice) -RunId 'r1'
+
+        $result.Count | Should -Be 5
+        ($result | Where-Object { $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId | Sort-Object -Unique) | Should -Be @('ap1')
+        ($result | Where-Object { $_.IntuneManagedDeviceId } | Select-Object -ExpandProperty IntuneManagedDeviceId | Sort-Object -Unique) | Should -Be @('intune1', 'intune2')
+        ($result | Where-Object { $_.EntraObjectId } | Select-Object -ExpandProperty EntraObjectId | Sort-Object -Unique) | Should -Be @('entra1', 'entra2')
+        ($result | Select-Object -ExpandProperty MatchStatus | Sort-Object -Unique) | Should -Be @('Matched')
+    }
+
+    It 'flags a duplicate serial number as Ambiguous and never selects a single match when there is no Autopilot authority' {
+        $duplicateIntune = [PSCustomObject]@{ Id = 'intune2'; AzureAdDeviceId = 'aad-device-2'; SerialNumber = '5CD3271HSD'; DeviceName = 'SCRAPPED-02' }
         $result = Resolve-ScrappedDeviceRecords -SerialNumbers @('5CD3271HSD') -EntraDevices @($script:entraDevice) `
-            -IntuneDevices @($script:intuneDevice) -AutopilotDevices @($script:autopilotDevice, $duplicateAutopilot) -RunId 'r1'
+            -IntuneDevices @($script:intuneDevice, $duplicateIntune) -AutopilotDevices @() -RunId 'r1'
 
         $result[0].MatchStatus | Should -Be 'Ambiguous'
         $result[0].AmbiguityReason | Should -Be 'DuplicateSerialNumber'
-        $result[0].AutopilotIdentityId | Should -BeNullOrEmpty
+        $result[0].IntuneManagedDeviceId | Should -BeNullOrEmpty
     }
 
     It 'reports NotFound for a serial number absent from every source' {
