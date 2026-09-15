@@ -1,0 +1,50 @@
+name: PowerShell Tests
+
+on:
+  push:
+    branches: [ '**' ]
+  pull_request:
+    branches: [ '**' ]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Pester and PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module -Name Pester -RequiredVersion 5.5.0 -Force -SkipPublisherCheck
+          Install-Module -Name PSScriptAnalyzer -Force -SkipPublisherCheck
+
+      - name: Run PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-Location ./delete-stale-device-records-msgraph
+          Import-Module PSScriptAnalyzer
+          $results = Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1
+          $results | Format-Table -AutoSize
+          $blocking = $results | Where-Object Severity -eq 'Error'
+          if ($blocking) {
+            Write-Error "PSScriptAnalyzer found $($blocking.Count) blocking (Error severity) finding(s)."
+            exit 1
+          }
+
+      - name: Run Pester tests
+        shell: pwsh
+        run: |
+          Set-Location ./delete-stale-device-records-msgraph
+          Import-Module Pester -RequiredVersion 5.5.0
+          $config = New-PesterConfiguration
+          $config.Run.Path = './tests'
+          $config.Run.Exit = $true
+          $config.Output.Verbosity = 'Detailed'
+          $config.TestResult.Enabled = $true
+          $config.TestResult.OutputPath = './testResults.xml'
+          Invoke-Pester -Configuration $config

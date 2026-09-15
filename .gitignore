@@ -1,0 +1,33 @@
+# Generated run output (keep folder, ignore contents)
+output/**
+!output/.gitkeep
+
+# Logs
+*.log
+
+# Generated reports
+*.csv
+*.json
+!config/*.json
+!schemas/*.json
+!examples/**/*.json
+!config/*.example.csv
+
+# Real per-tenant scrapped-device serial list — never commit real hardware data.
+src/SkrotadeDatorer.csv
+
+# Local settings with tenant-specific values
+config/Settings.psd1
+config/ProtectedDevices.csv
+
+# PowerShell module caches
+*.psm1.cache
+
+# Test artifacts
+testResults.xml
+coverage.xml
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/

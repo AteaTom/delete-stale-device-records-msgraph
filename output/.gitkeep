@@ -1,0 +1,4 @@
+# output
+
+Timestamped run folders (`output\<yyyyMMdd-HHmmss>\`) are created here at
+each execution. Contents are git-ignored except this placeholder.

@@ -1,0 +1,174 @@
+#Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.0.0' }
+
+BeforeAll {
+    function global:Get-MgDevice { param([switch]$All, [string[]]$Property) }
+    function global:Get-MgDeviceManagementManagedDevice { param([switch]$All) }
+    function global:Get-MgDeviceManagementWindowsAutopilotDeviceIdentity { param([switch]$All, [string]$WindowsAutopilotDeviceIdentityId) }
+    function global:Connect-MgGraph { param([string[]]$Scopes, [string]$TenantId, [switch]$NoWelcome) }
+    function global:Get-MgContext { }
+    function global:Update-MgDevice { param([string]$DeviceId, [hashtable]$BodyParameter) }
+    function global:Remove-MgDevice { param([string]$DeviceId) }
+    function global:Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity { param([string]$WindowsAutopilotDeviceIdentityId) }
+
+    $modulePath = Join-Path $PSScriptRoot '..\src\StaleDeviceCleanup.psd1'
+    Import-Module $modulePath -Force
+    . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
+
+    $script:scriptPath = Join-Path $PSScriptRoot '..\src\Invoke-StaleDeviceCleanup.ps1'
+}
+
+Describe 'Parameter validation' {
+    It 'rejects DaysInactive below 180' {
+        { & $script:scriptPath -DaysInactive 179 -Mode Audit -WhatIf } | Should -Throw
+    }
+
+    It 'defaults Mode to Audit' {
+        $command = Get-Command $script:scriptPath
+        $command.Parameters['Mode'].Attributes.Where({ $_ -is [System.Management.Automation.ParameterAttribute] }) | Out-Null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:scriptPath, [ref]$null, [ref]$null)
+        $paramBlock = $ast.ParamBlock
+        $modeParam = $paramBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Mode' }
+        $default = $modeParam.DefaultValue.Extent.Text
+        $default | Should -Be "'Audit'"
+    }
+}
+
+Describe 'Request-DeletionConfirmation' {
+    It 'defaults to cancellation on empty input' {
+        Mock -CommandName Read-Host -ModuleName StaleDeviceCleanup -MockWith { '' }
+        Request-DeletionConfirmation | Should -Be $false
+    }
+
+    It 'cancels on ambiguous affirmative responses (Y, YES, J)' {
+        foreach ($response in @('Y', 'YES', 'J', 'yes')) {
+            Mock -CommandName Read-Host -ModuleName StaleDeviceCleanup -MockWith { $response }.GetNewClosure()
+            Request-DeletionConfirmation | Should -Be $false
+        }
+    }
+
+    It 'permits deletion only on the exact phrase DELETE' {
+        Mock -CommandName Read-Host -ModuleName StaleDeviceCleanup -MockWith { 'DELETE' }
+        Request-DeletionConfirmation | Should -Be $true
+    }
+
+    It 'is case-sensitive: "delete" (lowercase) does not confirm' {
+        Mock -CommandName Read-Host -ModuleName StaleDeviceCleanup -MockWith { 'delete' }
+        Request-DeletionConfirmation | Should -Be $false
+    }
+}
+
+Describe 'ShouldProcess / WhatIf enforcement on destructive functions' {
+    It 'Disable-EntraDeviceRecord updates accountEnabled to false' {
+        Mock -CommandName Update-MgDevice -ModuleName StaleDeviceCleanup -MockWith { }
+        Disable-EntraDeviceRecord -EntraObjectId 'obj1' -Confirm:$false | Out-Null
+        Assert-MockCalled -CommandName Update-MgDevice -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
+            $DeviceId -eq 'obj1' -and $BodyParameter.accountEnabled -eq $false
+        }
+    }
+
+    It 'Disable-EntraDeviceRecord does not call Graph under -WhatIf' {
+        Mock -CommandName Update-MgDevice -ModuleName StaleDeviceCleanup -MockWith { }
+        Disable-EntraDeviceRecord -EntraObjectId 'obj1' -WhatIf -Confirm:$false | Out-Null
+        Assert-MockCalled -CommandName Update-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+    }
+
+    It 'Remove-WindowsAutopilotRecord does not call the Graph cmdlet under -WhatIf' {
+        Mock -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -MockWith { }
+        Remove-WindowsAutopilotRecord -WindowsAutopilotDeviceIdentityId 'id1' -WhatIf | Out-Null
+        Assert-MockCalled -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 0
+    }
+
+    It 'Remove-EntraDeviceRecord does not call the Graph cmdlet under -WhatIf' {
+        Mock -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -MockWith { }
+        Remove-EntraDeviceRecord -EntraObjectId 'obj1' -WhatIf | Out-Null
+        Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+    }
+
+    It 'Remove-EntraDeviceRecord does not call the Graph cmdlet when -Confirm:$false is combined with -WhatIf' {
+        Mock -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -MockWith { }
+        Remove-EntraDeviceRecord -EntraObjectId 'obj2' -WhatIf -Confirm:$false | Out-Null
+        Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+    }
+}
+
+Describe 'Invoke-GraphWithRetry' {
+    It 'retries on a transient (429) failure and eventually succeeds' {
+        $script:callCount = 0
+        $block = {
+            $script:callCount++
+            if ($script:callCount -lt 2) { throw [System.Exception]::new('429 Too Many Requests') }
+            return 'ok'
+        }
+        Mock -CommandName Start-Sleep -ModuleName StaleDeviceCleanup -MockWith { }
+        $result = Invoke-GraphWithRetry -ScriptBlock $block -OperationName 'Test' -MaxRetries 3 -InitialDelaySeconds 1
+        $result | Should -Be 'ok'
+        $script:callCount | Should -Be 2
+    }
+
+    It 'does not retry a permanent (non-transient) failure' {
+        Mock -CommandName Start-Sleep -ModuleName StaleDeviceCleanup -MockWith { }
+        $block = { throw [System.Exception]::new('403 Forbidden') }
+        { Invoke-GraphWithRetry -ScriptBlock $block -OperationName 'Test' -MaxRetries 3 -InitialDelaySeconds 1 } | Should -Throw
+    }
+
+    It 'gives up after MaxRetries transient failures' {
+        Mock -CommandName Start-Sleep -ModuleName StaleDeviceCleanup -MockWith { }
+        $block = { throw [System.Exception]::new('503 Service Unavailable') }
+        { Invoke-GraphWithRetry -ScriptBlock $block -OperationName 'Test' -MaxRetries 2 -InitialDelaySeconds 1 } | Should -Throw
+    }
+}
+
+Describe 'End-to-end mode behavior (fully mocked Graph)' {
+    BeforeAll {
+        Mock -CommandName Connect-MgGraph -ModuleName StaleDeviceCleanup -MockWith { }
+        Mock -CommandName Get-MgContext -ModuleName StaleDeviceCleanup -MockWith {
+            [PSCustomObject]@{ TenantId = 'tenant1'; AuthType = 'Delegated'; Scopes = @('Device.Read.All', 'DeviceManagementManagedDevices.Read.All', 'DeviceManagementServiceConfig.Read.All', 'Device.ReadWrite.All', 'DeviceManagementServiceConfig.ReadWrite.All') }
+        }
+        Mock -CommandName Get-MgDevice -ModuleName StaleDeviceCleanup -MockWith {
+            @((New-TestEntraDevice -Id 'obj1' -DeviceId 'dev1' -DisplayName 'STALE-WIN01' -ApproximateLastSignInDateTime (Get-Date).ToUniversalTime().AddDays(-300)))
+        }
+        Mock -CommandName Get-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -MockWith { @() }
+        Mock -CommandName Get-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -MockWith { @() }
+        Mock -CommandName Update-MgDevice -ModuleName StaleDeviceCleanup -MockWith { }
+        Mock -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -MockWith { }
+        Mock -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -MockWith { }
+    }
+
+    BeforeEach {
+        $script:runOutputPath = Join-Path ([System.IO.Path]::GetTempPath()) "sdc-e2e-$(New-Guid)"
+    }
+
+    AfterEach {
+        Remove-Item -Path $script:runOutputPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'Audit mode never calls a destructive Graph operation' {
+        & $script:scriptPath -Mode Audit -DaysInactive 180 -OutputPath $script:runOutputPath
+        Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+        Assert-MockCalled -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 0
+    }
+
+    It 'Automatic mode without -ConfirmDeletion never calls a destructive Graph operation' {
+        & $script:scriptPath -Mode Automatic -DaysInactive 180 -OutputPath $script:runOutputPath
+        Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+    }
+
+    It 'Automatic mode disables a stale Entra device before removal eligibility' {
+        & $script:scriptPath -Mode Automatic -DaysInactive 180 -OutputPath $script:runOutputPath -ConfirmDeletion
+        Assert-MockCalled -CommandName Update-MgDevice -ModuleName StaleDeviceCleanup -Times 1
+        Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+    }
+
+    It 'Interactive mode cancels safely on empty confirmation input' {
+        Mock -CommandName Read-Host -ModuleName StaleDeviceCleanup -MockWith { '' }
+        & $script:scriptPath -Mode Interactive -DaysInactive 180 -OutputPath $script:runOutputPath
+        Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+    }
+
+    It 'reports are written before any confirmation prompt in Interactive mode' {
+        Mock -CommandName Read-Host -ModuleName StaleDeviceCleanup -MockWith { '' }
+        & $script:scriptPath -Mode Interactive -DaysInactive 180 -OutputPath $script:runOutputPath
+        $runFolder = Get-ChildItem -Path $script:runOutputPath -Directory | Select-Object -First 1
+        Test-Path (Join-Path $runFolder.FullName 'DeletionCandidates.csv') | Should -Be $true
+    }
+}
