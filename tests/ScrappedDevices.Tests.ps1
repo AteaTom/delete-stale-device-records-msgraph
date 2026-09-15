@@ -7,7 +7,7 @@ BeforeAll {
     function global:Remove-MgDevice { param([string]$DeviceId) }
     function global:Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity { param([string]$WindowsAutopilotDeviceIdentityId) }
     function global:Remove-MgDeviceManagementManagedDevice { param([string]$ManagedDeviceId) }
-    function global:Invoke-MgGraphRequest { param([string]$Method, [string]$Uri, [object]$Body) }
+    function global:Invoke-MgGraphRequest { param([string]$Method, [string]$Uri, [object]$Body, [string]$ContentType) }
 
     $modulePath = Join-Path $PSScriptRoot '..\src\StaleDeviceCleanup.psd1'
     Import-Module $modulePath -Force
@@ -198,7 +198,10 @@ Describe 'Invoke-ScrappedDeviceRemoval' {
         $record.IntuneRemovalStatus | Should -Be 'Removed'
         $record.EntraRemovalStatus | Should -Be 'Removed'
         Assert-MockCalled -CommandName Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
-            $Method -eq 'POST' -and $Uri -match 'windowsAutopilotDeviceIdentities/deleteDevices$' -and $Body.serialNumbers -contains '5CD3271HSD'
+            $parsedBody = $Body | ConvertFrom-Json
+            $Method -eq 'POST' -and $Uri -match 'windowsAutopilotDeviceIdentities/deleteDevices$' -and
+                $ContentType -eq 'application/json' -and $Body -is [string] -and
+                $parsedBody.serialNumbers -contains '5CD3271HSD'
         }
         Assert-MockCalled -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 0
         Assert-MockCalled -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 1
@@ -317,7 +320,7 @@ Describe 'Submit-WindowsAutopilotBulkRemoval chunking' {
     It 'submits 201 unique serial numbers as sequential chunks of 100, 100, and 1' {
         $global:autopilotBatchSizes = [System.Collections.Generic.List[int]]::new()
         Mock -CommandName Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -MockWith {
-            $serials = @($Body.serialNumbers)
+            $serials = @(($Body | ConvertFrom-Json).serialNumbers)
             $global:autopilotBatchSizes.Add($serials.Count)
             @{ value = @($serials | ForEach-Object { [PSCustomObject]@{ serialNumber = $_; deviceRegistrationId = "id-$_"; deletionState = 'accepted'; errorMessage = $null } }) }
         }
@@ -329,11 +332,15 @@ Describe 'Submit-WindowsAutopilotBulkRemoval chunking' {
         $result.Count | Should -Be 201
         @($result | Where-Object DeletionState -eq 'accepted').Count | Should -Be 201
         Assert-MockCalled -CommandName Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 3
+        Assert-MockCalled -CommandName Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 3 -ParameterFilter {
+            $ContentType -eq 'application/json' -and $Body -is [string] -and
+                @(($Body | ConvertFrom-Json).serialNumbers).Count -le 100
+        }
     }
 
     It 'continues after one chunk fails and marks only that chunk as errors' {
         Mock -CommandName Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -MockWith {
-            $serials = @($Body.serialNumbers)
+            $serials = @(($Body | ConvertFrom-Json).serialNumbers)
             if ($serials[0] -eq 'SERIAL-101') { throw [System.Exception]::new('400 Rejected chunk') }
             @{ value = @($serials | ForEach-Object { [PSCustomObject]@{ serialNumber = $_; deviceRegistrationId = "id-$_"; deletionState = 'accepted'; errorMessage = $null } }) }
         }

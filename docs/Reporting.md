@@ -61,6 +61,12 @@ Related object states include `Removed`, `RemovalFailed`,
 It confirms submission, not immediate disappearance from the Autopilot portal;
 the service completes that work asynchronously.
 
+For scrapped-device runs, the completion log and `RunSummary.json` count
+Autopilot, Intune, and Entra outcomes by unique nonempty object ID, not by
+expanded CSV row. The summary also includes unique input, matched, ambiguous,
+not-found, and error serial counts. This prevents one serial expanded across
+multiple object rows from inflating completion totals.
+
 When a serial exists in Autopilot, the script expands the serial to include
 all related Entra and Intune objects for that same serial, so the report is the
 exact object set that will be deleted. When no Autopilot authority exists,

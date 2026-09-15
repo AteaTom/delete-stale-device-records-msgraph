@@ -9,7 +9,7 @@ BeforeAll {
     function global:Update-MgDevice { param([string]$DeviceId, [hashtable]$BodyParameter) }
     function global:Remove-MgDevice { param([string]$DeviceId) }
     function global:Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity { param([string]$WindowsAutopilotDeviceIdentityId) }
-    function global:Invoke-MgGraphRequest { param([string]$Method, [string]$Uri, [object]$Body) }
+    function global:Invoke-MgGraphRequest { param([string]$Method, [string]$Uri, [object]$Body, [string]$ContentType) }
 
     $modulePath = Join-Path $PSScriptRoot '..\src\StaleDeviceCleanup.psd1'
     Import-Module $modulePath -Force
@@ -319,6 +319,14 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
         Assert-MockCalled -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 1
         Assert-MockCalled -CommandName Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1
         Assert-MockCalled -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 0
+        $runFolder = Get-ChildItem -Path $script:runOutputPath -Directory | Select-Object -First 1
+        $executionLog = Get-Content -LiteralPath (Join-Path $runFolder.FullName 'ExecutionLog.txt') -Raw
+        $executionLog | Should -Match 'Scrapped device removals completed: Autopilot submissions accepted=1; Intune removed=1; Entra removed=1\.'
+        $runSummary = Get-Content -LiteralPath (Join-Path $runFolder.FullName 'RunSummary.json') -Raw | ConvertFrom-Json
+        $runSummary.TotalScrappedAutopilotRemovalSubmitted | Should -Be 1
+        $runSummary.TotalScrappedIntuneDevicesRemoved | Should -Be 1
+        $runSummary.TotalScrappedEntraDevicesRemoved | Should -Be 1
+        $runSummary.TotalErrors | Should -Be 0
 
         Remove-Item -Path $scrappedPath -Force -ErrorAction SilentlyContinue
     }

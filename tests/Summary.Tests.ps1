@@ -92,6 +92,29 @@ Describe 'New-RunSummary' {
         $summary.TotalAutopilotRemoved | Should -Be 0
         $summary.TotalEntraDevicesRemoved | Should -Be 0
     }
+
+    It 'counts scrapped-device outcomes by unique serial and object ids' {
+        $scrappedRecords = @(
+            [PSCustomObject]@{ NormalizedSerialNumber = 'serial1'; MatchStatus = 'Matched'; AutopilotIdentityId = 'ap1'; IntuneManagedDeviceId = $null; EntraObjectId = $null; AutopilotRemovalStatus = 'RemovalSubmitted'; IntuneRemovalStatus = 'NotApplicable'; EntraRemovalStatus = 'NotApplicable'; ErrorMessage = $null },
+            [PSCustomObject]@{ NormalizedSerialNumber = 'serial1'; MatchStatus = 'Matched'; AutopilotIdentityId = 'ap1'; IntuneManagedDeviceId = 'intune1'; EntraObjectId = $null; AutopilotRemovalStatus = 'RemovalSubmitted'; IntuneRemovalStatus = 'Removed'; EntraRemovalStatus = 'NotApplicable'; ErrorMessage = $null },
+            [PSCustomObject]@{ NormalizedSerialNumber = 'serial1'; MatchStatus = 'Matched'; AutopilotIdentityId = 'ap1'; IntuneManagedDeviceId = $null; EntraObjectId = 'entra1'; AutopilotRemovalStatus = 'RemovalSubmitted'; IntuneRemovalStatus = 'NotApplicable'; EntraRemovalStatus = 'Removed'; ErrorMessage = $null },
+            [PSCustomObject]@{ NormalizedSerialNumber = 'serial2'; MatchStatus = 'NotFound'; AutopilotIdentityId = $null; IntuneManagedDeviceId = $null; EntraObjectId = $null; AutopilotRemovalStatus = 'NotAttempted'; IntuneRemovalStatus = 'NotAttempted'; EntraRemovalStatus = 'NotAttempted'; ErrorMessage = $null },
+            [PSCustomObject]@{ NormalizedSerialNumber = 'serial3'; MatchStatus = 'Matched'; AutopilotIdentityId = 'ap3'; IntuneManagedDeviceId = $null; EntraObjectId = 'entra3'; AutopilotRemovalStatus = 'RemovalFailed'; IntuneRemovalStatus = 'NotApplicable'; EntraRemovalStatus = 'SkippedAutopilotSubmissionFailed'; ErrorMessage = 'rejected' },
+            [PSCustomObject]@{ NormalizedSerialNumber = 'serial3'; MatchStatus = 'Matched'; AutopilotIdentityId = 'ap3'; IntuneManagedDeviceId = $null; EntraObjectId = $null; AutopilotRemovalStatus = 'RemovalFailed'; IntuneRemovalStatus = 'NotApplicable'; EntraRemovalStatus = 'NotApplicable'; ErrorMessage = 'rejected' }
+        )
+
+        $summary = New-RunSummary -RunId 'r4' -Mode 'Interactive' -StartTimeUtc (Get-Date).ToUniversalTime() -CutoffDateUtc (Get-Date).ToUniversalTime() -DaysInactive 180 -AllEvaluatedDevices @() -ScrappedDeviceRecords $scrappedRecords
+
+        $summary.ScrappedWorkflow | Should -BeTrue
+        $summary.TotalScrappedSerials | Should -Be 3
+        $summary.TotalScrappedMatchedSerials | Should -Be 2
+        $summary.TotalScrappedNotFoundSerials | Should -Be 1
+        $summary.TotalScrappedAutopilotRemovalSubmitted | Should -Be 1
+        $summary.TotalScrappedIntuneDevicesRemoved | Should -Be 1
+        $summary.TotalScrappedEntraDevicesRemoved | Should -Be 1
+        $summary.TotalScrappedErrors | Should -Be 1
+        $summary.TotalErrors | Should -Be 1
+    }
 }
 
 Describe 'AllEvaluatedDevices.csv required fields' {

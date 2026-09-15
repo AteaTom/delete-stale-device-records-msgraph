@@ -986,6 +986,7 @@ function New-RunSummary {
         [Parameter(Mandatory)][int]$DaysInactive,
         [int]$DaysDisabled = 30,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$AllEvaluatedDevices,
+        [AllowEmptyCollection()][object[]]$ScrappedDeviceRecords = @(),
         [bool]$WhatIfMode = $false,
         [bool]$ConfirmationGranted = $false,
         [bool]$DiscoveryComplete = $true,
@@ -1002,6 +1003,14 @@ function New-RunSummary {
     $deletedAutopilot = @($AllEvaluatedDevices | Where-Object AutopilotRemovalStatus -in 'Removed', 'AlreadyRemoved')
     $submittedAutopilot = @($AllEvaluatedDevices | Where-Object AutopilotRemovalStatus -eq 'RemovalSubmitted')
     $errors = @($AllEvaluatedDevices | Where-Object { $_.ErrorMessage })
+    $scrappedSerials = @($ScrappedDeviceRecords | Where-Object NormalizedSerialNumber | Select-Object -ExpandProperty NormalizedSerialNumber -Unique)
+    $scrappedMatchedSerials = @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'Matched' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique)
+    $scrappedAmbiguousSerials = @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'Ambiguous' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique)
+    $scrappedNotFoundSerials = @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'NotFound' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique)
+    $scrappedSubmittedAutopilot = @($ScrappedDeviceRecords | Where-Object { $_.AutopilotRemovalStatus -eq 'RemovalSubmitted' -and $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId -Unique)
+    $scrappedRemovedIntune = @($ScrappedDeviceRecords | Where-Object { $_.IntuneRemovalStatus -eq 'Removed' -and $_.IntuneManagedDeviceId } | Select-Object -ExpandProperty IntuneManagedDeviceId -Unique)
+    $scrappedRemovedEntra = @($ScrappedDeviceRecords | Where-Object { $_.EntraRemovalStatus -eq 'Removed' -and $_.EntraObjectId } | Select-Object -ExpandProperty EntraObjectId -Unique)
+    $scrappedErrorSerials = @($ScrappedDeviceRecords | Where-Object { $_.ErrorMessage -and $_.NormalizedSerialNumber } | Select-Object -ExpandProperty NormalizedSerialNumber -Unique)
 
     return [PSCustomObject][ordered]@{
         RunId                     = $RunId
@@ -1023,7 +1032,16 @@ function New-RunSummary {
         TotalEntraDevicesRemoved  = $deletedEntra.Count
         TotalAutopilotRemoved     = $deletedAutopilot.Count
         TotalAutopilotRemovalSubmitted = $submittedAutopilot.Count
-        TotalErrors               = $errors.Count
+        ScrappedWorkflow          = ($ScrappedDeviceRecords.Count -gt 0)
+        TotalScrappedSerials      = $scrappedSerials.Count
+        TotalScrappedMatchedSerials = $scrappedMatchedSerials.Count
+        TotalScrappedAmbiguousSerials = $scrappedAmbiguousSerials.Count
+        TotalScrappedNotFoundSerials = $scrappedNotFoundSerials.Count
+        TotalScrappedAutopilotRemovalSubmitted = $scrappedSubmittedAutopilot.Count
+        TotalScrappedIntuneDevicesRemoved = $scrappedRemovedIntune.Count
+        TotalScrappedEntraDevicesRemoved = $scrappedRemovedEntra.Count
+        TotalScrappedErrors       = $scrappedErrorSerials.Count
+        TotalErrors               = $errors.Count + $scrappedErrorSerials.Count
         ConfirmationGranted       = $ConfirmationGranted
         ExitCode                  = $ExitCode
     }
@@ -1437,14 +1455,15 @@ function Submit-WindowsAutopilotBulkRemoval {
     for ($batchIndex = 0; $batchIndex -lt $batchCount; $batchIndex++) {
         $startIndex = $batchIndex * $BatchSize
         $endIndex = [Math]::Min($startIndex + $BatchSize - 1, $uniqueSerialNumbers.Count - 1)
-        $serialNumberBatch = @($uniqueSerialNumbers[$startIndex..$endIndex])
+        $serialNumberBatch = @($uniqueSerialNumbers[$startIndex..$endIndex] | ForEach-Object { [string]$_ })
+        $requestBody = @{ serialNumbers = [string[]]$serialNumberBatch } | ConvertTo-Json -Compress
         Write-CleanupLog -Message "Submitting Autopilot bulk removal chunk $($batchIndex + 1) of $batchCount with $($serialNumberBatch.Count) serial number(s)." -Level INFO -LogPath $LogPath
 
         try {
             $response = Invoke-GraphWithRetry -OperationName "Bulk remove Windows Autopilot device identities (chunk $($batchIndex + 1) of $batchCount)" -LogPath $LogPath -ScriptBlock {
                 Invoke-MgGraphRequest -Method POST `
                     -Uri 'https://graph.microsoft.com/v1.0/deviceManagement/windowsAutopilotDeviceIdentities/deleteDevices' `
-                    -Body @{ serialNumbers = $serialNumberBatch } -ErrorAction Stop
+                    -Body $requestBody -ContentType 'application/json' -ErrorAction Stop
             }
         } catch {
             $chunkError = $_.Exception.Message
@@ -1506,6 +1525,7 @@ function Invoke-ScrappedDeviceRemoval {
 
     $matchedRecords = @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'Matched')
     $seenIntuneIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $loggedAutopilotErrorSerials = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($record in $matchedRecords) {
         if (-not $record.IntuneManagedDeviceId) {
             $record.IntuneRemovalStatus = 'NotApplicable'
@@ -1576,7 +1596,9 @@ function Invoke-ScrappedDeviceRemoval {
             } else {
                 "Autopilot bulk removal returned state '$deletionState'."
             }
-            Write-CleanupLog -Message "Autopilot bulk removal was not accepted for serial '$($record.InputSerialNumber)': $($record.ErrorMessage)" -Level ERROR -LogPath $LogPath
+            if ($loggedAutopilotErrorSerials.Add([string]$record.NormalizedSerialNumber)) {
+                Write-CleanupLog -Message "Autopilot bulk removal was not accepted for serial '$($record.InputSerialNumber)': $($record.ErrorMessage)" -Level ERROR -LogPath $LogPath
+            }
         }
     }
 

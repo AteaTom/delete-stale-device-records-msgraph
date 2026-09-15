@@ -50,6 +50,14 @@ unique serial numbers. Transient Graph failures are retried per chunk. If one
 chunk still fails, its serials receive `RemovalFailed`, while later chunks
 continue and retain their own results.
 
+## Autopilot bulk removal reports a self-referencing serialization loop
+
+Update to the latest project version. Older bulk-removal builds passed a
+PowerShell object directly to `Invoke-MgGraphRequest`, which could make the SDK
+inspect the adapted `Chars` property on strings and fail before any request
+reached Microsoft Graph. Current versions serialize a JSON request body
+explicitly and set `Content-Type: application/json`.
+
 ## Entra devices are disabled instead of removed
 
 This is expected for a newly stale active device. The first eligible run sets

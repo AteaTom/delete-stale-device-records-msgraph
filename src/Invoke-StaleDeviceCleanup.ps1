@@ -161,6 +161,7 @@ $exitCode = 0
 $discoveryComplete = $true
 $confirmationGranted = $false
 $allEvaluatedDevices = @()
+$scrappedDeviceRecords = @()
 $cutoffDateUtc = (Get-Date).ToUniversalTime().AddDays(-$DaysInactive)
 $permissionCheck = [PSCustomObject]@{ HasAllRequired = $false; MissingScopes = @(); GrantedScopes = @() }
 $deviceLifecycleState = @{}
@@ -226,7 +227,6 @@ try {
 
     $indexes = New-DeviceIndexes -IntuneDevices $intuneDevices -AutopilotDevices $autopilotDevices
 
-    $scrappedDeviceRecords = @()
     if ($ScrappedDeviceCsvPath) {
         $scrappedCsvStatistics = $null
         $scrappedSerialNumbers = Get-ScrappedDeviceSerialNumbers -Path $ScrappedDeviceCsvPath -Statistics ([ref]$scrappedCsvStatistics)
@@ -281,9 +281,9 @@ try {
 
         Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords $scrappedDeviceRecords -LogPath $logPath -WhatIf:$WhatIfPreference
 
-        $scrappedSubmittedAutopilot = @($scrappedDeviceRecords | Where-Object AutopilotRemovalStatus -eq 'RemovalSubmitted' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique).Count
-        $scrappedRemovedIntune = @($scrappedDeviceRecords | Where-Object IntuneRemovalStatus -eq 'Removed').Count
-        $scrappedRemovedEntra = @($scrappedDeviceRecords | Where-Object EntraRemovalStatus -eq 'Removed').Count
+        $scrappedSubmittedAutopilot = @($scrappedDeviceRecords | Where-Object { $_.AutopilotRemovalStatus -eq 'RemovalSubmitted' -and $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId -Unique).Count
+        $scrappedRemovedIntune = @($scrappedDeviceRecords | Where-Object { $_.IntuneRemovalStatus -eq 'Removed' -and $_.IntuneManagedDeviceId } | Select-Object -ExpandProperty IntuneManagedDeviceId -Unique).Count
+        $scrappedRemovedEntra = @($scrappedDeviceRecords | Where-Object { $_.EntraRemovalStatus -eq 'Removed' -and $_.EntraObjectId } | Select-Object -ExpandProperty EntraObjectId -Unique).Count
         Write-CleanupLog -Message "Scrapped device removals completed: Autopilot submissions accepted=$scrappedSubmittedAutopilot; Intune removed=$scrappedRemovedIntune; Entra removed=$scrappedRemovedEntra." -Level INFO -LogPath $logPath
         Export-ReportCsv -InputObject $scrappedDeviceRecords -Path (Join-Path $resolvedOutputPath 'ScrappedDeviceResults.csv')
         if (@($scrappedDeviceRecords | Where-Object { $_.ErrorMessage }).Count -gt 0 -and $exitCode -eq 0) { $exitCode = 6 }
@@ -467,7 +467,7 @@ try {
 } finally {
     $runSummary = New-RunSummary -RunId $runId -Mode $Mode -StartTimeUtc $startTimeUtc -CutoffDateUtc $cutoffDateUtc `
         -DaysInactive $DaysInactive -DaysDisabled $DaysDisabled -AllEvaluatedDevices $allEvaluatedDevices -WhatIfMode ([bool]$WhatIfPreference) `
-        -ConfirmationGranted $confirmationGranted -DiscoveryComplete $discoveryComplete -ExitCode $exitCode
+        -ScrappedDeviceRecords $scrappedDeviceRecords -ConfirmationGranted $confirmationGranted -DiscoveryComplete $discoveryComplete -ExitCode $exitCode
 
     Complete-ProjectExecution -RunSummary $runSummary -OutputPath $resolvedOutputPath -LogPath $logPath
 }

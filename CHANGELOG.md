@@ -19,6 +19,11 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Serialize Autopilot bulk request bodies to explicit JSON before calling
+  `Invoke-MgGraphRequest`, preventing PowerShell's adapted string properties
+  from causing a self-referencing serialization loop.
+- Count scrapped-device completion and run-summary outcomes by unique serial or
+  object ID instead of expanded report rows, and log each failed serial once.
 - Replace serial, per-device Autopilot DELETE confirmation in the
   scrapped-device and stale-device workflows with Microsoft's v1.0
   `deleteDevices` bulk action. Unique Intune records are removed first in the
