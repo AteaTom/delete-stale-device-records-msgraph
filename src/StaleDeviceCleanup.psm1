@@ -1000,6 +1000,7 @@ function New-RunSummary {
     $disabledEntra = @($AllEvaluatedDevices | Where-Object { $_.PSObject.Properties['EntraDisableStatus'] -and $_.EntraDisableStatus -eq 'Disabled' })
     $deletedEntra = @($AllEvaluatedDevices | Where-Object EntraRemovalStatus -eq 'Removed')
     $deletedAutopilot = @($AllEvaluatedDevices | Where-Object AutopilotRemovalStatus -in 'Removed', 'AlreadyRemoved')
+    $submittedAutopilot = @($AllEvaluatedDevices | Where-Object AutopilotRemovalStatus -eq 'RemovalSubmitted')
     $errors = @($AllEvaluatedDevices | Where-Object { $_.ErrorMessage })
 
     return [PSCustomObject][ordered]@{
@@ -1021,6 +1022,7 @@ function New-RunSummary {
         TotalEntraDevicesDisabled  = $disabledEntra.Count
         TotalEntraDevicesRemoved  = $deletedEntra.Count
         TotalAutopilotRemoved     = $deletedAutopilot.Count
+        TotalAutopilotRemovalSubmitted = $submittedAutopilot.Count
         TotalErrors               = $errors.Count
         ConfirmationGranted       = $ConfirmationGranted
         ExitCode                  = $ExitCode
@@ -1406,107 +1408,188 @@ function Remove-IntuneManagedDeviceRecord {
     return $false
 }
 
+function Submit-WindowsAutopilotBulkRemoval {
+    <#
+        .SYNOPSIS
+        Submits unique serial numbers to the Microsoft Graph Autopilot
+        deleteDevices action in sequential chunks and returns its per-device
+        states. A failed chunk is converted to per-serial error states so later
+        chunks can still be processed.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+    [OutputType([object[]])]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$SerialNumbers,
+        [string]$LogPath,
+        [ValidateRange(1, 1000)][int]$BatchSize = 100
+    )
+
+    $uniqueSerialNumbers = @($SerialNumbers | Where-Object { $_ } | Select-Object -Unique)
+    if ($uniqueSerialNumbers.Count -eq 0) { return @() }
+
+    $target = "$($uniqueSerialNumbers.Count) unique serial number(s)"
+    if (-not $PSCmdlet.ShouldProcess($target, 'Submit bulk Windows Autopilot device removal')) {
+        return @()
+    }
+
+    $normalizedStates = [System.Collections.Generic.List[object]]::new()
+    $batchCount = [Math]::Ceiling($uniqueSerialNumbers.Count / [double]$BatchSize)
+    for ($batchIndex = 0; $batchIndex -lt $batchCount; $batchIndex++) {
+        $startIndex = $batchIndex * $BatchSize
+        $endIndex = [Math]::Min($startIndex + $BatchSize - 1, $uniqueSerialNumbers.Count - 1)
+        $serialNumberBatch = @($uniqueSerialNumbers[$startIndex..$endIndex])
+        Write-CleanupLog -Message "Submitting Autopilot bulk removal chunk $($batchIndex + 1) of $batchCount with $($serialNumberBatch.Count) serial number(s)." -Level INFO -LogPath $LogPath
+
+        try {
+            $response = Invoke-GraphWithRetry -OperationName "Bulk remove Windows Autopilot device identities (chunk $($batchIndex + 1) of $batchCount)" -LogPath $LogPath -ScriptBlock {
+                Invoke-MgGraphRequest -Method POST `
+                    -Uri 'https://graph.microsoft.com/v1.0/deviceManagement/windowsAutopilotDeviceIdentities/deleteDevices' `
+                    -Body @{ serialNumbers = $serialNumberBatch } -ErrorAction Stop
+            }
+        } catch {
+            $chunkError = $_.Exception.Message
+            Write-CleanupLog -Message "Autopilot bulk removal chunk $($batchIndex + 1) of $batchCount failed: $chunkError" -Level ERROR -LogPath $LogPath
+            foreach ($serialNumber in $serialNumberBatch) {
+                $normalizedStates.Add([PSCustomObject][ordered]@{
+                        SerialNumber         = $serialNumber
+                        DeviceRegistrationId = $null
+                        DeletionState        = 'error'
+                        ErrorMessage         = $chunkError
+                    })
+            }
+            continue
+        }
+
+        if ($null -eq $response) { continue }
+        $responseItems = if ($response -is [System.Collections.IDictionary]) { @($response['value']) } else { @($response.value) }
+        foreach ($responseItem in $responseItems) {
+            if ($null -eq $responseItem) { continue }
+            $getValue = {
+                param([object]$InputObject, [string]$PropertyName)
+                if ($InputObject -is [System.Collections.IDictionary]) { return $InputObject[$PropertyName] }
+                $property = $InputObject.PSObject.Properties[$PropertyName]
+                if ($property) { return $property.Value }
+                return $null
+            }
+            $serialNumber = & $getValue $responseItem 'serialNumber'
+            $deletionState = & $getValue $responseItem 'deletionState'
+            if (-not $serialNumber) {
+                Write-CleanupLog -Message 'Autopilot bulk removal returned an item without serialNumber; the item cannot authorize downstream Entra cleanup.' -Level WARNING -LogPath $LogPath
+            }
+            $normalizedStates.Add([PSCustomObject][ordered]@{
+                    SerialNumber         = $serialNumber
+                    DeviceRegistrationId = & $getValue $responseItem 'deviceRegistrationId'
+                    DeletionState        = $deletionState
+                    ErrorMessage         = & $getValue $responseItem 'errorMessage'
+                })
+        }
+    }
+    return $normalizedStates.ToArray()
+}
+
 function Invoke-ScrappedDeviceRemoval {
     <#
         .SYNOPSIS
-        Removes the Autopilot, Intune, and Entra records for each Matched
-        scrapped-device record, in that order. Entra removal is skipped for a
-        device whose Autopilot removal could not be confirmed, mirroring the
-        Autopilot-first safety rule used for stale-device removal. Ambiguous
-        and NotFound records are left untouched.
+        Removes unique Intune records, submits unique matched Autopilot serials
+        to Microsoft Graph in sequential chunks of at most 100, then removes
+        unique Entra records.
+        An accepted bulk state permits downstream cleanup without waiting for
+        eventual Autopilot portal consistency. Failed, error, unknown, or
+        missing states block downstream cleanup for that serial. Ambiguous and
+        NotFound records are left untouched.
     #>
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$ScrappedDeviceRecords,
-        [string]$LogPath,
-        [int]$AutopilotDeletionRetryAttempts = 3,
-        [int]$AutopilotDeletionRetryDelaySeconds = 30
+        [string]$LogPath
     )
 
-    $seenKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($record in @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'Matched')) {
-        $autopilotKey = if ($record.AutopilotIdentityId) { $record.AutopilotIdentityId } else { 'none' }
-        $intuneKey = if ($record.IntuneManagedDeviceId) { $record.IntuneManagedDeviceId } else { 'none' }
-        $entraKey = if ($record.EntraObjectId) { $record.EntraObjectId } else { 'none' }
-        $dedupeKey = "autopilot|$autopilotKey|intune|$intuneKey|entra|$entraKey"
-        if ($seenKeys.Contains($dedupeKey)) { continue }
-        $seenKeys.Add($dedupeKey) | Out-Null
+    $matchedRecords = @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'Matched')
+    $seenIntuneIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($record in $matchedRecords) {
+        if (-not $record.IntuneManagedDeviceId) {
+            $record.IntuneRemovalStatus = 'NotApplicable'
+            continue
+        }
+        if (-not $seenIntuneIds.Add([string]$record.IntuneManagedDeviceId)) {
+            $record.IntuneRemovalStatus = 'DuplicateSkipped'
+            continue
+        }
 
         try {
-            $autopilotBlocking = $false
-
-            if ($record.AutopilotIdentityId) {
-                Write-CleanupLog -Message "Removing Autopilot identity '$($record.AutopilotIdentityId)' for scrapped device serial '$($record.InputSerialNumber)'." -Level INFO -LogPath $LogPath
-                $alreadyRemoved = $false
-                try {
-                    Remove-WindowsAutopilotRecord -WindowsAutopilotDeviceIdentityId $record.AutopilotIdentityId -LogPath $LogPath -SuppressErrorLog -WhatIf:$WhatIfPreference -Confirm:$false | Out-Null
-                } catch {
-                    if ($_.Exception.Message -match 'ZtdDeviceAlreadyDeleted|already been deleted') {
-                        $alreadyRemoved = $true
-                    } elseif ($_.Exception.Message -notmatch 'ZtdDeviceDeletionInProgess|currently in progress') {
-                        throw
-                    }
-                }
-
-                if ($WhatIfPreference) {
-                    $record.AutopilotRemovalStatus = 'WhatIf'
-                } elseif ($alreadyRemoved) {
-                    $record.AutopilotRemovalStatus = 'AlreadyRemoved'
-                    Write-CleanupLog -Message "Autopilot deletion confirmed for '$($record.AutopilotIdentityId)'." -Level SUCCESS -LogPath $LogPath
-                } else {
-                    $confirmed = $false
-                    for ($attempt = 1; $attempt -le $AutopilotDeletionRetryAttempts; $attempt++) {
-                        if ($attempt -gt 1) {
-                            Write-CleanupLog -Message "Waiting $AutopilotDeletionRetryDelaySeconds second(s) before Autopilot deletion confirmation attempt $attempt of $AutopilotDeletionRetryAttempts for '$($record.AutopilotIdentityId)'." -Level DEBUG -LogPath $LogPath
-                            Start-Sleep -Seconds $AutopilotDeletionRetryDelaySeconds
-                        }
-                        try {
-                            Remove-WindowsAutopilotRecord -WindowsAutopilotDeviceIdentityId $record.AutopilotIdentityId -LogPath $LogPath -SuppressErrorLog -Confirm:$false | Out-Null
-                        } catch {
-                            if ($_.Exception.Message -match 'ZtdDeviceAlreadyDeleted|already been deleted') {
-                                $confirmed = $true
-                                break
-                            } elseif ($_.Exception.Message -notmatch 'ZtdDeviceDeletionInProgess|currently in progress') {
-                                throw
-                            }
-                        }
-                    }
-
-                    if ($confirmed) {
-                        $record.AutopilotRemovalStatus = 'AlreadyRemoved'
-                        Write-CleanupLog -Message "Autopilot deletion confirmed for '$($record.AutopilotIdentityId)'." -Level SUCCESS -LogPath $LogPath
-                    } else {
-                        $record.AutopilotRemovalStatus = 'RemovalUnconfirmed'
-                        $record.ErrorMessage = 'Autopilot removal was accepted but could not be confirmed within the retry budget.'
-                        $autopilotBlocking = $true
-                        Write-CleanupLog -Message "Autopilot removal for '$($record.AutopilotIdentityId)' could not be confirmed; Intune and Entra removal skipped for serial '$($record.InputSerialNumber)'." -Level ERROR -LogPath $LogPath
-                    }
-                }
+            $intuneRemoved = Remove-IntuneManagedDeviceRecord -ManagedDeviceId $record.IntuneManagedDeviceId -LogPath $LogPath -WhatIf:$WhatIfPreference -Confirm:$false
+            if ($WhatIfPreference) {
+                $record.IntuneRemovalStatus = 'WhatIf'
+            } elseif ($intuneRemoved) {
+                $record.IntuneRemovalStatus = 'Removed'
+                Write-CleanupLog -Message "Removed Intune managed device '$($record.IntuneManagedDeviceId)' for scrapped device serial '$($record.InputSerialNumber)'." -Level SUCCESS -LogPath $LogPath
             } else {
-                $record.AutopilotRemovalStatus = 'NotApplicable'
+                $record.IntuneRemovalStatus = 'Skipped'
             }
+        } catch {
+            $record.IntuneRemovalStatus = 'RemovalFailed'
+            $record.ErrorMessage = $_.Exception.Message
+            Write-CleanupLog -Message "Failed to remove Intune managed device '$($record.IntuneManagedDeviceId)' for scrapped device serial '$($record.InputSerialNumber)': $($_.Exception.Message)" -Level ERROR -LogPath $LogPath
+        }
+    }
 
-            if ($record.IntuneManagedDeviceId) {
-                if ($autopilotBlocking) {
-                    $record.IntuneRemovalStatus = 'SkippedAutopilotNotRemoved'
-                } else {
-                    $intuneRemoved = Remove-IntuneManagedDeviceRecord -ManagedDeviceId $record.IntuneManagedDeviceId -LogPath $LogPath -WhatIf:$WhatIfPreference -Confirm:$false
-                    if ($WhatIfPreference) {
-                        $record.IntuneRemovalStatus = 'WhatIf'
-                    } elseif ($intuneRemoved) {
-                        $record.IntuneRemovalStatus = 'Removed'
-                        Write-CleanupLog -Message "Removed Intune managed device '$($record.IntuneManagedDeviceId)' for scrapped device serial '$($record.InputSerialNumber)'." -Level SUCCESS -LogPath $LogPath
-                    } else {
-                        $record.IntuneRemovalStatus = 'Skipped'
-                    }
-                }
+    $autopilotSerials = @($matchedRecords | Where-Object AutopilotIdentityId | Select-Object -ExpandProperty InputSerialNumber -Unique)
+    $bulkStatesBySerial = @{}
+    $bulkSubmissionError = $null
+
+    if ($autopilotSerials.Count -gt 0) {
+        Write-CleanupLog -Message "Submitting $($autopilotSerials.Count) unique serial number(s) for bulk Autopilot removal." -Level INFO -LogPath $LogPath
+        try {
+            $bulkStates = @(Submit-WindowsAutopilotBulkRemoval -SerialNumbers $autopilotSerials -LogPath $LogPath -WhatIf:$WhatIfPreference -Confirm:$false)
+            foreach ($bulkState in $bulkStates) {
+                $normalizedSerial = ConvertTo-NormalizedSerialNumber -SerialNumber $bulkState.serialNumber
+                if ($normalizedSerial) { $bulkStatesBySerial[$normalizedSerial] = $bulkState }
+            }
+        } catch {
+            $bulkSubmissionError = $_.Exception.Message
+            Write-CleanupLog -Message "Autopilot bulk removal request failed: $bulkSubmissionError" -Level ERROR -LogPath $LogPath
+        }
+    }
+
+    foreach ($record in $matchedRecords) {
+        if (-not $record.AutopilotIdentityId) {
+            $record.AutopilotRemovalStatus = 'NotApplicable'
+            continue
+        }
+
+        if ($WhatIfPreference) {
+            $record.AutopilotRemovalStatus = 'WhatIf'
+            continue
+        }
+
+        $normalizedSerial = ConvertTo-NormalizedSerialNumber -SerialNumber $record.InputSerialNumber
+        $bulkState = if ($normalizedSerial -and $bulkStatesBySerial.ContainsKey($normalizedSerial)) { $bulkStatesBySerial[$normalizedSerial] } else { $null }
+        $deletionState = if ($bulkState -and $bulkState.deletionState) { $bulkState.deletionState.ToString().ToLowerInvariant() } else { 'missing' }
+        if ($deletionState -eq 'accepted') {
+            $record.AutopilotRemovalStatus = 'RemovalSubmitted'
+        } else {
+            $record.AutopilotRemovalStatus = 'RemovalFailed'
+            $record.ErrorMessage = if ($bulkSubmissionError) {
+                $bulkSubmissionError
+            } elseif ($bulkState -and $bulkState.errorMessage) {
+                $bulkState.errorMessage
             } else {
-                $record.IntuneRemovalStatus = 'NotApplicable'
+                "Autopilot bulk removal returned state '$deletionState'."
             }
+            Write-CleanupLog -Message "Autopilot bulk removal was not accepted for serial '$($record.InputSerialNumber)': $($record.ErrorMessage)" -Level ERROR -LogPath $LogPath
+        }
+    }
 
+    $seenEntraIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($record in $matchedRecords) {
+        $autopilotBlocking = $record.AutopilotIdentityId -and $record.AutopilotRemovalStatus -notin 'RemovalSubmitted', 'WhatIf'
+
+        try {
             if ($record.EntraObjectId) {
                 if ($autopilotBlocking) {
-                    $record.EntraRemovalStatus = 'SkippedAutopilotNotRemoved'
+                    $record.EntraRemovalStatus = 'SkippedAutopilotSubmissionFailed'
+                } elseif (-not $seenEntraIds.Add([string]$record.EntraObjectId)) {
+                    $record.EntraRemovalStatus = 'DuplicateSkipped'
                 } else {
                     $entraRemoved = Remove-EntraDeviceRecord -EntraObjectId $record.EntraObjectId -LogPath $LogPath -WhatIf:$WhatIfPreference -Confirm:$false
                     if ($WhatIfPreference) {
@@ -1613,6 +1696,7 @@ Export-ModuleMember -Function @(
     'Wait-WindowsAutopilotRemoval',
     'Remove-EntraDeviceRecord',
     'Remove-IntuneManagedDeviceRecord',
+    'Submit-WindowsAutopilotBulkRemoval',
     'Invoke-ScrappedDeviceRemoval',
     'Initialize-ProjectExecution',
     'Complete-ProjectExecution'

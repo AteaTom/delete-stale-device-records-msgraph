@@ -42,6 +42,7 @@
         'Wait-WindowsAutopilotRemoval',
         'Remove-EntraDeviceRecord',
         'Remove-IntuneManagedDeviceRecord',
+        'Submit-WindowsAutopilotBulkRemoval',
         'Invoke-ScrappedDeviceRemoval',
         'Initialize-ProjectExecution',
         'Complete-ProjectExecution'

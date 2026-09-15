@@ -101,6 +101,17 @@ Instead, the scrapped-device summary shows the exact deletion targets for the
 serial that was supplied. It is displayed before interactive confirmation and
 deduplicates object IDs when counting Autopilot, Intune, and Entra removals.
 
+After confirmation, the scrapped-device operation follows this order:
+
+1. Remove each unique matched Intune managed-device record once.
+2. Submit every unique Autopilot serial number once through Microsoft Graph's
+   v1.0 `windowsAutopilotDeviceIdentities/deleteDevices` action, using
+   sequential chunks of at most 100 serial numbers.
+3. Treat `accepted` as a successful asynchronous submission and continue
+   without polling for the Autopilot record to disappear.
+4. Remove each unique related Entra object once. A `failed`, `error`, `unknown`,
+   or missing bulk result blocks Entra removal for that serial.
+
 ## Decision precedence (evaluated in order per device)
 
 1. `Server` / `Unsupported` platform → **Excluded** (`UnsupportedPlatform`)
@@ -124,15 +135,15 @@ calculate `DaysDisabled`.
 
 For each lifecycle `Candidate`:
 
-1. If Windows, Autopilot-present, and `MatchConfidence = High`: remove the
-   Autopilot identity (`ShouldProcess`), then issue an idempotent DELETE
-   confirmation. `ZtdDeviceAlreadyDeleted` confirms the Autopilot step; a
-   `ZtdDeviceDeletionInProgess` response is retried according to the configured
-   retry budget before either Entra action can proceed.
-2. A stale active device (`EntraAction = Disable`) is updated with
-   `accountEnabled = false` and its disable timestamp is saved.
-3. A disabled device at the retention threshold (`EntraAction = Remove`) is
-   removed from Entra and its state entry is deleted.
-4. If Autopilot removal fails or cannot be confirmed, the Entra action is not
-   performed; the failure is recorded and processing continues.
-5. iOS and Android candidates are never sent to any Autopilot cmdlet.
+1. For Windows with Autopilot and `MatchConfidence = High`, submit each unique
+   serial once through the Graph v1.0 `deleteDevices` bulk action in sequential
+   chunks of at most 100.
+2. If Graph returns `accepted`, a stale active device (`EntraAction = Disable`)
+   is updated with `accountEnabled = false` and its disable timestamp is saved.
+3. If an eligible disabled device still has an Autopilot record, mark Entra
+   removal `PendingAutopilotRemoval`; do not permanently delete it in that run.
+4. On a later run where discovery no longer finds Autopilot, remove the
+   eligible disabled Entra object and delete its state entry.
+5. If bulk submission fails or has no usable result, skip the Entra action,
+   record the failure, and continue processing.
+6. iOS and Android candidates are never sent to the Autopilot bulk action.

@@ -30,15 +30,19 @@ the field list documented in the project specification, including
 UTC. `DisabledSinceUtc` and `DaysDisabled` describe the persisted lifecycle
 age used for removal eligibility.
 
-Autopilot removal statuses include `Removed`, `AlreadyRemoved`,
-`RemovalInProgress`, `RemovalUnconfirmed`, `Skipped`, and `NotAttempted`.
-`AlreadyRemoved` means Graph explicitly reported that the identity had already
-been deleted and the matched Entra removal was allowed to continue.
+Lifecycle Autopilot statuses include `RemovalSubmitted`, `RemovalFailed`,
+`WhatIf`, `NotApplicable`, and `NotAttempted`. `RemovalSubmitted` means Graph
+accepted asynchronous processing; it does not mean the record has already
+disappeared. `PendingAutopilotRemoval` on the Entra status means permanent
+deletion is deferred until a later discovery confirms Autopilot absence.
 
 Entra lifecycle statuses include `Disabled`, `NotYetEligible`, `WhatIf`,
 `Skipped`, and `NotAttempted`. `RunSummary.json` includes planned and completed
 counts for both disabling and removal, and `ExecutionLog.txt` records the same
-counts at planning and completion.
+counts at planning and completion. `RunSummary.json` also includes
+`TotalAutopilotRemovalSubmitted` separately from `TotalAutopilotRemoved`.
+An accepted-but-pending `RemovalSubmitted` row is not included in
+`DeletedDevices.csv` solely because of that status.
 
 ## Scrapped-device columns
 
@@ -47,9 +51,15 @@ counts at planning and completion.
 `AmbiguityReason`, `AutopilotIdentityId`, `AutopilotEnrollmentState`,
 `IntuneManagedDeviceId`, `IntuneDeviceName`, `EntraObjectId`,
 `EntraDeviceName`, and per-target `AutopilotRemovalStatus`,
-`IntuneRemovalStatus`, `EntraRemovalStatus` (`Removed`, `AlreadyRemoved`,
-`RemovalUnconfirmed`, `SkippedAutopilotNotRemoved`, `WhatIf`, `Skipped`,
-`NotApplicable`, `NotAttempted`).
+`IntuneRemovalStatus`, `EntraRemovalStatus`. Scrapped-device Autopilot states
+include `RemovalSubmitted`, `RemovalFailed`, `WhatIf`, and `NotApplicable`.
+Related object states include `Removed`, `RemovalFailed`,
+`SkippedAutopilotSubmissionFailed`, `DuplicateSkipped`, `WhatIf`, `Skipped`,
+`NotApplicable`, and `NotAttempted`.
+
+`RemovalSubmitted` means the Microsoft Graph bulk action returned `accepted`.
+It confirms submission, not immediate disappearance from the Autopilot portal;
+the service completes that work asynchronously.
 
 When a serial exists in Autopilot, the script expands the serial to include
 all related Entra and Intune objects for that same serial, so the report is the

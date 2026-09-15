@@ -19,6 +19,21 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Replace serial, per-device Autopilot DELETE confirmation in the
+  scrapped-device and stale-device workflows with Microsoft's v1.0
+  `deleteDevices` bulk action. Unique Intune records are removed first in the
+  scrapped workflow; an `accepted` bulk state permits deduplicated cleanup
+  without waiting for eventual portal consistency. Failed or missing bulk
+  states block the related Entra action.
+- Split Autopilot `deleteDevices` submissions into sequential chunks of at most
+  100 unique serial numbers. Retry and failure handling is isolated per chunk,
+  allowing later chunks to continue when one request fails.
+- Remove the obsolete `-AutopilotDeletionRetryAttempts` and
+  `-AutopilotDeletionRetryDelaySeconds` parameters. Active stale Entra objects
+  can be disabled after an accepted bulk submission, while permanent Entra
+  deletion is deferred until a later discovery confirms Autopilot absence.
+- Deduplicate Autopilot, Intune, and Entra operations independently so repeated
+  object rows cannot submit or remove the same tenant object more than once.
 - Separate the scrapped-device CSV workflow into an explicit early-return branch.
   When `-ScrappedDeviceCsvPath` is supplied, the script resolves the serials,
   validates mode/confirmation, performs the scrapped-device deletion flow, and
@@ -43,14 +58,11 @@ All notable changes to this project are documented in this file.
 - Add `Update-MgDevice`-based disabling and log planned/completed counts for
   Entra objects to disable and remove in the console, `ExecutionLog.txt`, and
   `RunSummary.json`.
-- Treat Graph `ZtdDeviceAlreadyDeleted` as confirmed Autopilot removal and
-  continue with the matched Entra device removal.
-- Retry `ZtdDeviceDeletionInProgess` with configurable
-  `-AutopilotDeletionRetryAttempts` and
-  `-AutopilotDeletionRetryDelaySeconds` values; skip Entra removal if the
-  deletion remains unconfirmed.
 - Reduce duplicate logging for expected Autopilot deletion states and reload
   an older in-memory module definition when required parameters are missing.
+- Extend the in-memory module compatibility check to include the scrapped CSV
+  statistics and summary parameters, preventing stale PowerShell sessions from
+  failing with an unknown `Statistics` parameter.
 
 ## [1.0.0] - 2026-09-01
 

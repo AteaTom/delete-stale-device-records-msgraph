@@ -31,13 +31,24 @@ when this occurs.
 ## Autopilot removal reported but Entra device still exists
 
 Check `AutopilotRemovalStatus` and `EntraRemovalStatus` in
-`AllEvaluatedDevices.csv`. If `AutopilotRemovalStatus = AlreadyRemoved`, Graph
-confirmed that the Autopilot identity was already deleted and Entra removal was
-allowed to continue. If it is `RemovalInProgress`, Graph is still processing
-the delete and the configured retry budget was exhausted; Entra deletion was
-intentionally skipped. If it is `RemovalUnconfirmed`, Graph accepted the
-request but did not provide confirmation within the retry budget. Re-run in
-Audit mode before retrying either case.
+`AllEvaluatedDevices.csv`. `AutopilotRemovalStatus = RemovalSubmitted` means
+Graph accepted asynchronous deletion. For an active stale object, Entra can be
+disabled immediately. For an eligible disabled object,
+`EntraRemovalStatus = PendingAutopilotRemoval` means permanent deletion is
+intentionally deferred. Run the tool again later; normal discovery must show
+that Autopilot is absent before Entra is permanently removed.
+
+For `ScrappedDeviceResults.csv`, `RemovalSubmitted` means the v1.0 Autopilot
+bulk endpoint accepted the serial for asynchronous deletion. The script does
+not wait for the portal to synchronize. Microsoft notes that deregistration
+can take time; use **Sync** and **Refresh** in the Intune Autopilot devices view
+if the record remains visible. `RemovalFailed` means Graph rejected the bulk
+submission and the related Entra removal was intentionally skipped.
+
+Autopilot bulk submissions are split into sequential chunks of at most 100
+unique serial numbers. Transient Graph failures are retried per chunk. If one
+chunk still fails, its serials receive `RemovalFailed`, while later chunks
+continue and retain their own results.
 
 ## Entra devices are disabled instead of removed
 
@@ -69,6 +80,19 @@ Removing an Intune managed device requires
 `DeviceManagementManagedDevices.ReadWrite.All`, which is only requested when
 `-ScrappedDeviceCsvPath` is supplied in a destructive mode. Re-consent if the
 account previously only had the read-only Intune scope.
+
+## A parameter cannot be found that matches parameter name Statistics
+
+This means an older `StaleDeviceCleanup` module is still loaded in the current
+PowerShell session while a newer script file is running. Current versions
+detect the missing scrapped-device parameters and reload the local module
+automatically. Pull the latest project files and run the command again. For an
+older checkout, start a new PowerShell session or run:
+
+```powershell
+Remove-Module StaleDeviceCleanup -Force -ErrorAction SilentlyContinue
+Import-Module .\src\StaleDeviceCleanup.psd1 -Force
+```
 
 ## Throttling (HTTP 429)
 

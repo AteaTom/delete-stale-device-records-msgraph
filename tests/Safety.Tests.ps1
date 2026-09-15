@@ -9,6 +9,7 @@ BeforeAll {
     function global:Update-MgDevice { param([string]$DeviceId, [hashtable]$BodyParameter) }
     function global:Remove-MgDevice { param([string]$DeviceId) }
     function global:Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity { param([string]$WindowsAutopilotDeviceIdentityId) }
+    function global:Invoke-MgGraphRequest { param([string]$Method, [string]$Uri, [object]$Body) }
 
     $modulePath = Join-Path $PSScriptRoot '..\src\StaleDeviceCleanup.psd1'
     Import-Module $modulePath -Force
@@ -30,6 +31,15 @@ Describe 'Parameter validation' {
         $modeParam = $paramBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Mode' }
         $default = $modeParam.DefaultValue.Extent.Text
         $default | Should -Be "'Audit'"
+    }
+
+    It 'reloads an older module when scrapped-device parameters are missing' {
+        $scriptContent = Get-Content -LiteralPath $script:scriptPath -Raw
+
+        $scriptContent | Should -Match "Get-ScrappedDeviceSerialNumbers'.*ErrorAction SilentlyContinue"
+        $scriptContent | Should -Match "getScrappedSerialsCommand\.Parameters\.ContainsKey\('Statistics'\)"
+        $scriptContent | Should -Match "showScrappedSummaryCommand\.Parameters\.ContainsKey\('CsvDuplicateCount'\)"
+        $scriptContent | Should -Match "Get-Command -Name 'Submit-WindowsAutopilotBulkRemoval'.*ErrorAction SilentlyContinue"
     }
 }
 
@@ -159,6 +169,102 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
         Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
     }
 
+    It 'bulk-submits Autopilot and disables an active stale Entra device when accepted' {
+        Mock -CommandName Get-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -MockWith {
+            @([PSCustomObject]@{ Id = 'ap1'; AzureActiveDirectoryDeviceId = 'dev1'; ManagedDeviceId = $null; SerialNumber = 'STALE-SERIAL-1'; EnrollmentState = 'enrolled'; LastContactedDateTime = $null })
+        }
+        Mock -CommandName Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -MockWith {
+            @{ value = @([PSCustomObject]@{ serialNumber = 'STALE-SERIAL-1'; deviceRegistrationId = 'ap1'; deletionState = 'accepted'; errorMessage = $null }) }
+        }
+
+        & $script:scriptPath -Mode Automatic -DaysInactive 180 -OutputPath $script:runOutputPath -ConfirmDeletion
+
+        Assert-MockCalled -CommandName Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1
+        Assert-MockCalled -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 0
+        Assert-MockCalled -CommandName Update-MgDevice -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $DeviceId -eq 'obj1' }
+        Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+    }
+
+    It 'defers permanent Entra removal until a later run confirms Autopilot is absent' {
+        New-Item -ItemType Directory -Path $script:runOutputPath -Force | Out-Null
+        @{ obj1 = @{ DisabledSinceUtc = (Get-Date).ToUniversalTime().AddDays(-40).ToString('o') } } |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $script:runOutputPath 'DeviceLifecycleState.json')
+        Mock -CommandName Get-MgDevice -ModuleName StaleDeviceCleanup -MockWith {
+            @((New-TestEntraDevice -Id 'obj1' -DeviceId 'dev1' -DisplayName 'STALE-WIN01' -AccountEnabled $false))
+        }
+        Mock -CommandName Get-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -MockWith {
+            @([PSCustomObject]@{ Id = 'ap1'; AzureActiveDirectoryDeviceId = 'dev1'; ManagedDeviceId = $null; SerialNumber = 'STALE-SERIAL-1'; EnrollmentState = 'enrolled'; LastContactedDateTime = $null })
+        }
+        Mock -CommandName Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -MockWith {
+            @{ value = @([PSCustomObject]@{ serialNumber = 'STALE-SERIAL-1'; deviceRegistrationId = 'ap1'; deletionState = 'accepted'; errorMessage = $null }) }
+        }
+
+        & $script:scriptPath -Mode Automatic -DaysInactive 180 -DaysDisabled 30 -OutputPath $script:runOutputPath -ConfirmDeletion
+
+        Assert-MockCalled -CommandName Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1
+        Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+        $runFolder = Get-ChildItem -Path $script:runOutputPath -Directory | Select-Object -First 1
+        $result = Import-Csv -LiteralPath (Join-Path $runFolder.FullName 'AllEvaluatedDevices.csv')
+        $result[0].AutopilotRemovalStatus | Should -Be 'RemovalSubmitted'
+        $result[0].EntraRemovalStatus | Should -Be 'PendingAutopilotRemoval'
+    }
+
+    It 'does not simulate permanent Entra removal under WhatIf while Autopilot is still present' {
+        New-Item -ItemType Directory -Path $script:runOutputPath -Force | Out-Null
+        @{ obj1 = @{ DisabledSinceUtc = (Get-Date).ToUniversalTime().AddDays(-40).ToString('o') } } |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $script:runOutputPath 'DeviceLifecycleState.json')
+        Mock -CommandName Get-MgDevice -ModuleName StaleDeviceCleanup -MockWith {
+            @((New-TestEntraDevice -Id 'obj1' -DeviceId 'dev1' -DisplayName 'STALE-WIN01' -AccountEnabled $false))
+        }
+        Mock -CommandName Get-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -MockWith {
+            @([PSCustomObject]@{ Id = 'ap1'; AzureActiveDirectoryDeviceId = 'dev1'; ManagedDeviceId = $null; SerialNumber = 'STALE-SERIAL-1'; EnrollmentState = 'enrolled'; LastContactedDateTime = $null })
+        }
+        Mock -CommandName Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -MockWith { }
+
+        & $script:scriptPath -Mode Automatic -DaysInactive 180 -DaysDisabled 30 -OutputPath $script:runOutputPath -ConfirmDeletion -WhatIf
+
+        Assert-MockCalled -CommandName Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0
+        Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+        $runFolder = Get-ChildItem -Path $script:runOutputPath -Directory | Select-Object -First 1
+        $result = Import-Csv -LiteralPath (Join-Path $runFolder.FullName 'AllEvaluatedDevices.csv')
+        $result[0].AutopilotRemovalStatus | Should -Be 'WhatIf'
+        $result[0].EntraRemovalStatus | Should -Be 'PendingAutopilotRemoval'
+    }
+
+    It 'removes an eligible disabled Entra device when a later discovery finds no Autopilot record' {
+        New-Item -ItemType Directory -Path $script:runOutputPath -Force | Out-Null
+        @{ obj1 = @{ DisabledSinceUtc = (Get-Date).ToUniversalTime().AddDays(-40).ToString('o') } } |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $script:runOutputPath 'DeviceLifecycleState.json')
+        Mock -CommandName Get-MgDevice -ModuleName StaleDeviceCleanup -MockWith {
+            @((New-TestEntraDevice -Id 'obj1' -DeviceId 'dev1' -DisplayName 'STALE-WIN01' -AccountEnabled $false))
+        }
+        Mock -CommandName Get-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -MockWith { @() }
+        Mock -CommandName Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -MockWith { }
+
+        & $script:scriptPath -Mode Automatic -DaysInactive 180 -DaysDisabled 30 -OutputPath $script:runOutputPath -ConfirmDeletion
+
+        Assert-MockCalled -CommandName Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0
+        Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $DeviceId -eq 'obj1' }
+    }
+
+    It 'blocks the Entra action when stale-device Autopilot bulk submission fails' {
+        Mock -CommandName Get-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -MockWith {
+            @([PSCustomObject]@{ Id = 'ap1'; AzureActiveDirectoryDeviceId = 'dev1'; ManagedDeviceId = $null; SerialNumber = 'STALE-SERIAL-1'; EnrollmentState = 'enrolled'; LastContactedDateTime = $null })
+        }
+        Mock -CommandName Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -MockWith {
+            @{ value = @([PSCustomObject]@{ serialNumber = 'STALE-SERIAL-1'; deviceRegistrationId = 'ap1'; deletionState = 'failed'; errorMessage = 'Service rejected deletion.' }) }
+        }
+
+        & $script:scriptPath -Mode Automatic -DaysInactive 180 -OutputPath $script:runOutputPath -ConfirmDeletion
+
+        Assert-MockCalled -CommandName Update-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+        Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+        $runFolder = Get-ChildItem -Path $script:runOutputPath -Directory | Select-Object -First 1
+        $result = Import-Csv -LiteralPath (Join-Path $runFolder.FullName 'AllEvaluatedDevices.csv')
+        $result[0].AutopilotRemovalStatus | Should -Be 'RemovalFailed'
+        $result[0].EntraRemovalStatus | Should -Be 'SkippedAutopilotSubmissionFailed'
+    }
+
     It 'Interactive mode cancels safely on empty confirmation input' {
         Mock -CommandName Read-Host -ModuleName StaleDeviceCleanup -MockWith { '' }
         & $script:scriptPath -Mode Interactive -DaysInactive 180 -OutputPath $script:runOutputPath
@@ -202,8 +308,8 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
         Mock -CommandName Update-MgDevice -ModuleName StaleDeviceCleanup -MockWith { }
         Mock -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -MockWith { }
         Mock -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -MockWith { }
-        Mock -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -MockWith {
-            throw [System.Exception]::new('ZtdDeviceAlreadyDeleted: already been deleted')
+        Mock -CommandName Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -MockWith {
+            @{ value = @([PSCustomObject]@{ serialNumber = '5CD3271HSD'; deviceRegistrationId = 'ap1'; deletionState = 'accepted'; errorMessage = $null }) }
         }
 
         & $script:scriptPath -Mode Automatic -DaysInactive 180 -OutputPath $script:runOutputPath -ConfirmDeletion -ScrappedDeviceCsvPath $scrappedPath
@@ -211,7 +317,8 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
         Assert-MockCalled -CommandName Update-MgDevice -ModuleName StaleDeviceCleanup -Times 0
         Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $DeviceId -eq 'obj1' }
         Assert-MockCalled -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 1
-        Assert-MockCalled -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 1
+        Assert-MockCalled -CommandName Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1
+        Assert-MockCalled -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 0
 
         Remove-Item -Path $scrappedPath -Force -ErrorAction SilentlyContinue
     }

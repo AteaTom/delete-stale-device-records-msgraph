@@ -11,8 +11,9 @@
     calculates each device's effective last activity, and classifies devices
     as deletion candidates, excluded, or requiring manual review.
 
-    Intune managed-device records are NEVER deleted by this script. Intune
-    data is used only as a correlation and activity source.
+    Intune managed-device records are never deleted by the activity-based
+    stale-device workflow. The explicit scrapped-device workflow is the only
+    path that removes Intune records.
 
     ALWAYS RUN AUDIT MODE FIRST AND REVIEW ALL GENERATED REPORTS BEFORE USING
     A DESTRUCTIVE MODE.
@@ -61,9 +62,13 @@
     .PARAMETER ScrappedDeviceCsvPath
     Path to a recurring CSV/text file containing one physically scrapped
     device serial number per line (header optional). Every serial number that
-    matches a Windows Autopilot identity, Intune managed device, and/or
-    Entra device object is removed from all three, independent of activity,
-    disabled-state, or platform. Ambiguous (duplicate serial) or unmatched
+    matches a Windows Autopilot identity, Intune managed device, and/or Entra
+    device object is submitted for removal from the applicable systems,
+    independent of activity, disabled-state, or platform. Intune records are
+    removed first, then Autopilot serials are submitted through Microsoft's
+    bulk deleteDevices action. An accepted submission permits the related
+    Entra cleanup without waiting for Autopilot portal synchronization.
+    Ambiguous (duplicate serial) or unmatched
     entries are reported but never acted on. Duplicate rows in the input file
     are ignored case-insensitively and counted in the pre-deletion summary.
     Subject to the same Mode/
@@ -118,12 +123,6 @@ param(
 
     [switch]$AllowOnPremisesSyncedDeletion,
 
-    [ValidateRange(1, 10)]
-    [int]$AutopilotDeletionRetryAttempts = 3,
-
-    [ValidateRange(1, 300)]
-    [int]$AutopilotDeletionRetryDelaySeconds = 30,
-
     [string]$ScrappedDeviceCsvPath
 )
 
@@ -136,7 +135,18 @@ $modulePath = Join-Path -Path $PSScriptRoot -ChildPath 'StaleDeviceCleanup.psd1'
 # injected into the existing module scope) so mocked commands are preserved.
 $loadedModule = Get-Module -Name 'StaleDeviceCleanup'
 $removeAutopilotCommand = Get-Command -Name 'Remove-WindowsAutopilotRecord' -ErrorAction SilentlyContinue
-if (-not $loadedModule -or -not $removeAutopilotCommand.Parameters.ContainsKey('SuppressErrorLog')) {
+$getScrappedSerialsCommand = Get-Command -Name 'Get-ScrappedDeviceSerialNumbers' -ErrorAction SilentlyContinue
+$showScrappedSummaryCommand = Get-Command -Name 'Show-ScrappedDeviceSummary' -ErrorAction SilentlyContinue
+$submitAutopilotBulkCommand = Get-Command -Name 'Submit-WindowsAutopilotBulkRemoval' -ErrorAction SilentlyContinue
+$moduleIsCurrent = $loadedModule `
+    -and $removeAutopilotCommand `
+    -and $removeAutopilotCommand.Parameters.ContainsKey('SuppressErrorLog') `
+    -and $getScrappedSerialsCommand `
+    -and $getScrappedSerialsCommand.Parameters.ContainsKey('Statistics') `
+    -and $showScrappedSummaryCommand `
+    -and $showScrappedSummaryCommand.Parameters.ContainsKey('CsvDuplicateCount') `
+    -and $submitAutopilotBulkCommand
+if (-not $moduleIsCurrent) {
     Import-Module -Name $modulePath -Force
 }
 
@@ -269,14 +279,12 @@ try {
             }
         }
 
-        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords $scrappedDeviceRecords -LogPath $logPath `
-            -AutopilotDeletionRetryAttempts $AutopilotDeletionRetryAttempts -AutopilotDeletionRetryDelaySeconds $AutopilotDeletionRetryDelaySeconds `
-            -WhatIf:$WhatIfPreference
+        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords $scrappedDeviceRecords -LogPath $logPath -WhatIf:$WhatIfPreference
 
-        $scrappedRemovedAutopilot = @($scrappedDeviceRecords | Where-Object AutopilotRemovalStatus -in 'AlreadyRemoved', 'Removed').Count
+        $scrappedSubmittedAutopilot = @($scrappedDeviceRecords | Where-Object AutopilotRemovalStatus -eq 'RemovalSubmitted' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique).Count
         $scrappedRemovedIntune = @($scrappedDeviceRecords | Where-Object IntuneRemovalStatus -eq 'Removed').Count
         $scrappedRemovedEntra = @($scrappedDeviceRecords | Where-Object EntraRemovalStatus -eq 'Removed').Count
-        Write-CleanupLog -Message "Scrapped device removals completed: Autopilot removed=$scrappedRemovedAutopilot; Intune removed=$scrappedRemovedIntune; Entra removed=$scrappedRemovedEntra." -Level INFO -LogPath $logPath
+        Write-CleanupLog -Message "Scrapped device removals completed: Autopilot submissions accepted=$scrappedSubmittedAutopilot; Intune removed=$scrappedRemovedIntune; Entra removed=$scrappedRemovedEntra." -Level INFO -LogPath $logPath
         Export-ReportCsv -InputObject $scrappedDeviceRecords -Path (Join-Path $resolvedOutputPath 'ScrappedDeviceResults.csv')
         if (@($scrappedDeviceRecords | Where-Object { $_.ErrorMessage }).Count -gt 0 -and $exitCode -eq 0) { $exitCode = 6 }
         return
@@ -346,87 +354,62 @@ try {
     if ($shouldAttemptDeletion -and $discoveryComplete) {
         $candidates = @($allEvaluatedDevices | Where-Object Decision -eq 'Candidate')
         $deletionErrors = 0
+        $autopilotCandidates = @($candidates | Where-Object {
+                $_.Platform -eq 'Windows' -and $_.AutopilotPresent -and $_.MatchConfidence -eq 'High'
+            })
+        $autopilotSerials = @($autopilotCandidates | Where-Object AutopilotSerialNumber | Select-Object -ExpandProperty AutopilotSerialNumber -Unique)
+        $bulkStatesBySerial = @{}
+        $bulkSubmissionError = $null
+
+        if ($autopilotSerials.Count -gt 0) {
+            Write-CleanupLog -Message "Submitting $($autopilotSerials.Count) unique stale-device serial number(s) for bulk Autopilot removal." -Level INFO -LogPath $logPath
+            try {
+                $bulkStates = @(Submit-WindowsAutopilotBulkRemoval -SerialNumbers $autopilotSerials -LogPath $logPath -WhatIf:$WhatIfPreference -Confirm:$false)
+                foreach ($bulkState in $bulkStates) {
+                    $normalizedSerial = ConvertTo-NormalizedSerialNumber -SerialNumber $bulkState.serialNumber
+                    if ($normalizedSerial) { $bulkStatesBySerial[$normalizedSerial] = $bulkState }
+                }
+            } catch {
+                $bulkSubmissionError = $_.Exception.Message
+                Write-CleanupLog -Message "Stale-device Autopilot bulk removal request failed: $bulkSubmissionError" -Level ERROR -LogPath $logPath
+            }
+        }
+
+        foreach ($candidate in $autopilotCandidates) {
+            if ($WhatIfPreference) {
+                $candidate.AutopilotRemovalStatus = 'WhatIf'
+                continue
+            }
+
+            $normalizedSerial = ConvertTo-NormalizedSerialNumber -SerialNumber $candidate.AutopilotSerialNumber
+            $bulkState = if ($normalizedSerial -and $bulkStatesBySerial.ContainsKey($normalizedSerial)) { $bulkStatesBySerial[$normalizedSerial] } else { $null }
+            $deletionState = if ($bulkState -and $bulkState.deletionState) { $bulkState.deletionState.ToString().ToLowerInvariant() } else { 'missing' }
+            if ($deletionState -eq 'accepted') {
+                $candidate.AutopilotRemovalStatus = 'RemovalSubmitted'
+            } else {
+                $candidate.AutopilotRemovalStatus = 'RemovalFailed'
+                $candidate.ErrorMessage = if ($bulkSubmissionError) {
+                    $bulkSubmissionError
+                } elseif (-not $normalizedSerial) {
+                    'The matched Autopilot identity has no usable serial number for bulk removal.'
+                } elseif ($bulkState -and $bulkState.errorMessage) {
+                    $bulkState.errorMessage
+                } else {
+                    "Autopilot bulk removal returned state '$deletionState'."
+                }
+                Write-CleanupLog -Message "Stale-device Autopilot bulk removal was not accepted for serial '$($candidate.AutopilotSerialNumber)' and Entra object '$($candidate.EntraObjectId)': $($candidate.ErrorMessage)" -Level ERROR -LogPath $logPath
+                $deletionErrors++
+            }
+        }
 
         foreach ($candidate in $candidates) {
             try {
-                $autopilotRemoved = $true
-
-                if ($candidate.Platform -eq 'Windows' -and $candidate.AutopilotPresent -and $candidate.MatchConfidence -eq 'High') {
-                    $autopilotRemoved = $false
-                    Write-CleanupLog -Message "Removing Autopilot identity '$($candidate.AutopilotIdentityId)' for Entra device '$($candidate.EntraObjectId)'." -Level INFO -LogPath $logPath
-                    # Blanket confirmation was already obtained (typed DELETE, or -ConfirmDeletion); do not re-prompt per device.
-                    $alreadyRemoved = $false
-                    $removalInProgress = $false
-                    try {
-                        $removed = Remove-WindowsAutopilotRecord -WindowsAutopilotDeviceIdentityId $candidate.AutopilotIdentityId -LogPath $logPath -SuppressErrorLog -WhatIf:$WhatIfPreference -Confirm:$false
-                    } catch {
-                        if ($_.Exception.Message -match 'ZtdDeviceAlreadyDeleted|already been deleted') {
-                            $removed = $true
-                            $alreadyRemoved = $true
-                            $candidate.AutopilotRemovalStatus = 'AlreadyRemoved'
-                            Write-CleanupLog -Message "Autopilot deletion confirmed for '$($candidate.AutopilotIdentityId)'; continuing with Entra device removal." -Level SUCCESS -LogPath $logPath
-                        } elseif ($_.Exception.Message -match 'ZtdDeviceDeletionInProgess|currently in progress') {
-                            $removed = $true
-                            Write-CleanupLog -Message "Autopilot deletion is in progress for '$($candidate.AutopilotIdentityId)'; retrying confirmation." -Level INFO -LogPath $logPath
-                        } else {
-                            throw
-                        }
-                    }
-
-                    if ($WhatIfPreference) {
-                        $candidate.AutopilotRemovalStatus = 'WhatIf'
-                        $autopilotRemoved = $true
-                    } elseif ($removalInProgress) {
-                        $autopilotRemoved = $false
-                    } elseif ($removed) {
-                        if ($alreadyRemoved) {
-                            $autopilotRemoved = $true
-                        } else {
-                            $confirmationComplete = $false
-                            for ($confirmationAttempt = 1; $confirmationAttempt -le $AutopilotDeletionRetryAttempts; $confirmationAttempt++) {
-                                if ($confirmationAttempt -gt 1) {
-                                    Write-CleanupLog -Message "Waiting $AutopilotDeletionRetryDelaySeconds second(s) before Autopilot deletion confirmation attempt $confirmationAttempt of $AutopilotDeletionRetryAttempts for '$($candidate.AutopilotIdentityId)'." -Level DEBUG -LogPath $logPath
-                                    Start-Sleep -Seconds $AutopilotDeletionRetryDelaySeconds
-                                }
-
-                                try {
-                                    Remove-WindowsAutopilotRecord -WindowsAutopilotDeviceIdentityId $candidate.AutopilotIdentityId -LogPath $logPath -SuppressErrorLog -WhatIf:$WhatIfPreference -Confirm:$false | Out-Null
-                                    if ($confirmationAttempt -eq $AutopilotDeletionRetryAttempts) {
-                                        $candidate.AutopilotRemovalStatus = 'RemovalUnconfirmed'
-                                        $candidate.ErrorMessage = 'Autopilot removal was accepted but could not be confirmed within the retry budget.'
-                                        Write-CleanupLog -Message "Autopilot removal for '$($candidate.AutopilotIdentityId)' remains unconfirmed after $AutopilotDeletionRetryAttempts confirmation attempt(s); Entra device removal skipped." -Level ERROR -LogPath $logPath
-                                    }
-                                } catch {
-                                    if ($_.Exception.Message -match 'ZtdDeviceAlreadyDeleted|already been deleted') {
-                                        $candidate.AutopilotRemovalStatus = 'AlreadyRemoved'
-                                        $autopilotRemoved = $true
-                                        $confirmationComplete = $true
-                                        Write-CleanupLog -Message "Autopilot deletion confirmed for '$($candidate.AutopilotIdentityId)'; continuing with Entra device removal." -Level SUCCESS -LogPath $logPath
-                                        break
-                                    } elseif ($_.Exception.Message -match 'ZtdDeviceDeletionInProgess|currently in progress') {
-                                        if ($confirmationAttempt -eq $AutopilotDeletionRetryAttempts) {
-                                            $candidate.AutopilotRemovalStatus = 'RemovalInProgress'
-                                            $candidate.ErrorMessage = 'Autopilot deletion is still in progress after the retry budget; Entra removal was skipped.'
-                                            Write-CleanupLog -Message "Autopilot deletion is still in progress for '$($candidate.AutopilotIdentityId)' after $AutopilotDeletionRetryAttempts confirmation attempt(s); Entra device removal skipped." -Level WARNING -LogPath $logPath
-                                        }
-                                    } else {
-                                        throw
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        $candidate.AutopilotRemovalStatus = 'Skipped'
-                    }
-                } elseif ($candidate.Platform -eq 'Windows' -and $candidate.AutopilotPresent) {
-                    # Confidence below High: never delete Autopilot automatically.
-                    $autopilotRemoved = $false
-                    $candidate.AutopilotRemovalStatus = 'SkippedLowConfidence'
-                } else {
+                if (-not $candidate.AutopilotPresent) {
                     $candidate.AutopilotRemovalStatus = 'NotApplicable'
                 }
 
-                if ($autopilotRemoved -and $candidate.EntraAction -eq 'Disable') {
+                $autopilotAccepted = -not $candidate.AutopilotPresent -or $candidate.AutopilotRemovalStatus -in 'RemovalSubmitted', 'WhatIf'
+                if ($autopilotAccepted -and $candidate.EntraAction -eq 'Disable') {
                     $entraDisabled = Disable-EntraDeviceRecord -EntraObjectId $candidate.EntraObjectId -LogPath $logPath -WhatIf:$WhatIfPreference -Confirm:$false
                     if ($WhatIfPreference) {
                         $candidate.EntraDisableStatus = 'WhatIf'
@@ -440,7 +423,10 @@ try {
                     } else {
                         $candidate.EntraDisableStatus = 'Skipped'
                     }
-                } elseif ($autopilotRemoved -and $candidate.EntraAction -eq 'Remove') {
+                } elseif ($candidate.AutopilotPresent -and $candidate.AutopilotRemovalStatus -in 'RemovalSubmitted', 'WhatIf' -and $candidate.EntraAction -eq 'Remove') {
+                    $candidate.EntraRemovalStatus = 'PendingAutopilotRemoval'
+                    Write-CleanupLog -Message "Autopilot removal was accepted for '$($candidate.AutopilotIdentityId)'; permanent Entra removal for '$($candidate.EntraObjectId)' is deferred until a later discovery confirms the Autopilot record is absent." -Level INFO -LogPath $logPath
+                } elseif ($autopilotAccepted -and $candidate.EntraAction -eq 'Remove') {
                     $entraRemoved = Remove-EntraDeviceRecord -EntraObjectId $candidate.EntraObjectId -LogPath $logPath -WhatIf:$WhatIfPreference -Confirm:$false
                     if ($WhatIfPreference) {
                         $candidate.EntraRemovalStatus = 'WhatIf'
@@ -452,7 +438,7 @@ try {
                         $candidate.EntraRemovalStatus = 'Skipped'
                     }
                 } else {
-                    $candidate.EntraRemovalStatus = 'SkippedAutopilotNotRemoved'
+                    $candidate.EntraRemovalStatus = 'SkippedAutopilotSubmissionFailed'
                 }
             } catch {
                 $deletionErrors++
@@ -465,7 +451,8 @@ try {
         Save-DeviceLifecycleState -State $deviceLifecycleState -StatePath $statePath
         $disabledCount = @($allEvaluatedDevices | Where-Object EntraDisableStatus -eq 'Disabled').Count
         $removedCount = @($allEvaluatedDevices | Where-Object EntraRemovalStatus -eq 'Removed').Count
-        Write-CleanupLog -Message "Lifecycle actions completed: Entra object(s) disabled=$disabledCount; Entra object(s) removed=$removedCount." -Level INFO -LogPath $logPath
+        $autopilotSubmittedCount = @($allEvaluatedDevices | Where-Object AutopilotRemovalStatus -eq 'RemovalSubmitted').Count
+        Write-CleanupLog -Message "Lifecycle actions completed: Autopilot removal submission(s) accepted=$autopilotSubmittedCount; Entra object(s) disabled=$disabledCount; Entra object(s) removed=$removedCount." -Level INFO -LogPath $logPath
         Export-CleanupReports -AllEvaluatedDevices $allEvaluatedDevices -OutputPath $resolvedOutputPath
 
         if ($deletionErrors -gt 0 -and $exitCode -eq 0) { $exitCode = 6 }

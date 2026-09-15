@@ -63,6 +63,7 @@ Describe 'New-RunSummary' {
         $summary.TotalManualReview | Should -Be 1
         $summary.TotalEntraDevicesRemoved | Should -Be 1
         $summary.TotalErrors | Should -Be 1
+        $summary.TotalAutopilotRemovalSubmitted | Should -Be 0
     }
 
     It 'counts an AlreadyRemoved Autopilot identity as removed' {
@@ -76,6 +77,20 @@ Describe 'New-RunSummary' {
 
         $summary.TotalEntraDevicesRemoved | Should -Be 1
         $summary.TotalAutopilotRemoved | Should -Be 1
+    }
+
+    It 'counts an accepted Autopilot submission separately from completed removal' {
+        $device = [PSCustomObject]@{
+            Decision = 'Candidate'
+            EntraRemovalStatus = 'PendingAutopilotRemoval'
+            AutopilotRemovalStatus = 'RemovalSubmitted'
+            ErrorMessage = $null
+        }
+        $summary = New-RunSummary -RunId 'r3' -Mode 'Automatic' -StartTimeUtc (Get-Date).ToUniversalTime() -CutoffDateUtc (Get-Date).ToUniversalTime() -DaysInactive 180 -AllEvaluatedDevices @($device)
+
+        $summary.TotalAutopilotRemovalSubmitted | Should -Be 1
+        $summary.TotalAutopilotRemoved | Should -Be 0
+        $summary.TotalEntraDevicesRemoved | Should -Be 0
     }
 }
 
