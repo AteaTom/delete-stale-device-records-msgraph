@@ -177,9 +177,11 @@ For hardware that has been physically scrapped, maintain a recurring
 CSV/text file with one serial number per line (an optional header row is
 skipped automatically), for example `src/SkrotadeDatorer.csv`, and pass it
 via `-ScrappedDeviceCsvPath`. This workflow is entirely independent of
-`-DaysInactive`/`-DaysDisabled` and the stale-device evaluation: a matched
-serial number is removed regardless of how recently the device was used,
-even if it would otherwise be excluded as "recent activity detected":
+`-DaysInactive`/`-DaysDisabled` and the stale-device evaluation: when the
+parameter is supplied, the script takes the scrapped-device branch first and
+returns before the standard stale lifecycle flow runs. A matched serial number
+is removed regardless of how recently the device was used, even if it would
+otherwise be excluded as "recent activity detected":
 
 ```powershell
 .\src\Invoke-StaleDeviceCleanup.ps1 -Mode Interactive `
@@ -198,10 +200,11 @@ nothing is reported as `NotFound`.
 This is the only workflow in the project that removes Intune managed-device
 records, and it only ever acts on the serial numbers you explicitly listed.
 It follows the same Mode/`-WhatIf`/`-ConfirmDeletion` gating, and the same
-Autopilot-before-Entra safety order, as the rest of the tool. The
-`ScrappedDeviceResults.csv` report is structured to show the exact objects that
-will be removed for each serial, not a tenant-wide summary that mixes in other
-stale-device candidates.
+Autopilot-before-Entra safety order, as the rest of the tool. Because it is a
+separate early branch, it does not run the standard stale-device lifecycle for
+that same execution. The `ScrappedDeviceResults.csv` report is structured to
+show the exact objects that will be removed for each serial, not a tenant-wide
+summary that mixes in other stale-device candidates.
 
 ## Protected-device configuration
 

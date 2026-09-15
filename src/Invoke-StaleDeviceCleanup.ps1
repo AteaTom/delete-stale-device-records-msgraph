@@ -224,6 +224,53 @@ try {
         $scrappedAmbiguous = @($scrappedDeviceRecords | Where-Object MatchStatus -eq 'Ambiguous').Count
         $scrappedNotFound = @($scrappedDeviceRecords | Where-Object MatchStatus -eq 'NotFound').Count
         Write-CleanupLog -Message "Scrapped device resolution: Matched=$scrappedMatched Ambiguous=$scrappedAmbiguous NotFound=$scrappedNotFound." -Level INFO -LogPath $logPath
+
+        Export-ReportCsv -InputObject $scrappedDeviceRecords -Path (Join-Path $resolvedOutputPath 'ScrappedDeviceResults.csv')
+
+        switch ($Mode) {
+            'Audit' {
+                Write-CleanupLog -Message 'Scrapped-device branch: audit mode, no deletions were attempted.' -Level SUCCESS -LogPath $logPath
+                Write-Host 'Scrapped-device branch: audit mode, no deletions were attempted.'
+                return
+            }
+            'Interactive' {
+                if (-not $discoveryComplete -or -not $permissionCheck.HasAllRequired) {
+                    Write-CleanupLog -Message 'Scrapped-device branch: skipping confirmation because discovery is incomplete or permissions are insufficient.' -Level WARNING -LogPath $logPath
+                    return
+                }
+                $confirmationGranted = Request-DeletionConfirmation
+                if (-not $confirmationGranted) {
+                    Write-CleanupLog -Message 'Scrapped-device branch: administrator did not confirm deletion. No changes were made.' -Level INFO -LogPath $logPath
+                    $exitCode = 5
+                    return
+                }
+            }
+            'Automatic' {
+                if (-not $ConfirmDeletion) {
+                    Write-CleanupLog -Message 'Scrapped-device branch: automatic mode without -ConfirmDeletion. No changes were made.' -Level WARNING -LogPath $logPath
+                    $exitCode = 2
+                    return
+                }
+                if (-not $discoveryComplete -or -not $permissionCheck.HasAllRequired) {
+                    Write-CleanupLog -Message 'Scrapped-device branch: automatic mode is blocked because discovery is incomplete or permissions are insufficient.' -Level WARNING -LogPath $logPath
+                    $exitCode = 4
+                    return
+                }
+                $confirmationGranted = $true
+            }
+        }
+
+        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords $scrappedDeviceRecords -LogPath $logPath `
+            -AutopilotDeletionRetryAttempts $AutopilotDeletionRetryAttempts -AutopilotDeletionRetryDelaySeconds $AutopilotDeletionRetryDelaySeconds `
+            -WhatIf:$WhatIfPreference
+
+        $scrappedRemovedAutopilot = @($scrappedDeviceRecords | Where-Object AutopilotRemovalStatus -in 'AlreadyRemoved', 'Removed').Count
+        $scrappedRemovedIntune = @($scrappedDeviceRecords | Where-Object IntuneRemovalStatus -eq 'Removed').Count
+        $scrappedRemovedEntra = @($scrappedDeviceRecords | Where-Object EntraRemovalStatus -eq 'Removed').Count
+        Write-CleanupLog -Message "Scrapped device removals completed: Autopilot removed=$scrappedRemovedAutopilot; Intune removed=$scrappedRemovedIntune; Entra removed=$scrappedRemovedEntra." -Level INFO -LogPath $logPath
+        Export-ReportCsv -InputObject $scrappedDeviceRecords -Path (Join-Path $resolvedOutputPath 'ScrappedDeviceResults.csv')
+        if (@($scrappedDeviceRecords | Where-Object { $_.ErrorMessage }).Count -gt 0 -and $exitCode -eq 0) { $exitCode = 6 }
+        return
     }
 
     $allEvaluatedDevices = Get-StaleDeviceCandidates -EntraDevices $entraDevices -Indexes $indexes -CutoffDateUtc $cutoffDateUtc `
@@ -411,18 +458,6 @@ try {
         $removedCount = @($allEvaluatedDevices | Where-Object EntraRemovalStatus -eq 'Removed').Count
         Write-CleanupLog -Message "Lifecycle actions completed: Entra object(s) disabled=$disabledCount; Entra object(s) removed=$removedCount." -Level INFO -LogPath $logPath
         Export-CleanupReports -AllEvaluatedDevices $allEvaluatedDevices -OutputPath $resolvedOutputPath
-
-        if ($ScrappedDeviceCsvPath) {
-            Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords $scrappedDeviceRecords -LogPath $logPath `
-                -AutopilotDeletionRetryAttempts $AutopilotDeletionRetryAttempts -AutopilotDeletionRetryDelaySeconds $AutopilotDeletionRetryDelaySeconds `
-                -WhatIf:$WhatIfPreference
-            $scrappedRemovedAutopilot = @($scrappedDeviceRecords | Where-Object AutopilotRemovalStatus -in 'AlreadyRemoved', 'Removed').Count
-            $scrappedRemovedIntune = @($scrappedDeviceRecords | Where-Object IntuneRemovalStatus -eq 'Removed').Count
-            $scrappedRemovedEntra = @($scrappedDeviceRecords | Where-Object EntraRemovalStatus -eq 'Removed').Count
-            Write-CleanupLog -Message "Scrapped device removals completed: Autopilot removed=$scrappedRemovedAutopilot; Intune removed=$scrappedRemovedIntune; Entra removed=$scrappedRemovedEntra." -Level INFO -LogPath $logPath
-            Export-ReportCsv -InputObject $scrappedDeviceRecords -Path (Join-Path $resolvedOutputPath 'ScrappedDeviceResults.csv')
-            if (@($scrappedDeviceRecords | Where-Object { $_.ErrorMessage }).Count -gt 0 -and $exitCode -eq 0) { $exitCode = 6 }
-        }
 
         if ($deletionErrors -gt 0 -and $exitCode -eq 0) { $exitCode = 6 }
     }

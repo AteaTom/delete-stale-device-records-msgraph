@@ -77,8 +77,9 @@ deleted.
 
 The `-ScrappedDeviceCsvPath` workflow is intentionally independent from the
 stale-device activity evaluation. It takes the CSV serials as the authoritative
-input and resolves them only against the already-discovered Entra, Intune, and
-Autopilot records.
+input, resolves them only against the already-discovered Entra, Intune, and
+Autopilot records, and then exits early before the standard stale-device
+lifecycle executes for that run.
 
 - If a serial exists in Windows Autopilot, Autopilot is treated as the
   authority for that serial.

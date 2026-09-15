@@ -16,7 +16,13 @@ flowchart TD
     E --> H[New-DeviceIndexes]
     F --> H
     G --> H
-    H --> I[Get-StaleDeviceCandidates]
+    H --> X{ScrappedDeviceCsvPath supplied?}
+    X -->|Yes| Y[Resolve-ScrappedDeviceRecords]
+    Y --> Z1[Validate mode / confirmation]
+    Z1 --> Z2[Invoke-ScrappedDeviceRemoval]
+    Z2 --> Z3[Export ScrappedDeviceResults.csv]
+    Z3 --> Z4[Return early: do not run stale lifecycle]
+    X -->|No| I[Get-StaleDeviceCandidates]
     I --> J[Export-CleanupReports]
     J --> K[Show-CleanupSummary]
     K --> L{Mode}
@@ -25,20 +31,18 @@ flowchart TD
     L -->|Automatic + ConfirmDeletion| O[Proceed]
     N -->|DELETE typed| O
     N -->|anything else| M
-   O --> P[Remove-WindowsAutopilotRecord]
-   P --> Q[Idempotent DELETE confirmation with bounded retry]
-   Q -->|Confirmed| R{Lifecycle action}
-   R -->|Disable| S[Disable-EntraDeviceRecord]
-   R -->|Remove| T[Remove-EntraDeviceRecord]
-   Q -->|Unconfirmed| U[Skip Entra action, record error]
-   S --> V[Save lifecycle state]
-   T --> V
-   U --> V
+    O --> P[Remove-WindowsAutopilotRecord]
+    P --> Q[Idempotent DELETE confirmation with bounded retry]
+    Q -->|Confirmed| R{Lifecycle action}
+    R -->|Disable| S[Disable-EntraDeviceRecord]
+    R -->|Remove| T[Remove-EntraDeviceRecord]
+    Q -->|Unconfirmed| U[Skip Entra action, record error]
+    S --> V[Save lifecycle state]
+    T --> V
+    U --> V
     V --> W[Export-CleanupReports again]
-    W --> X{ScrappedDeviceCsvPath supplied?}
-    X -->|Yes| Y[Invoke-ScrappedDeviceRemoval]
-    Y --> Z[Complete-ProjectExecution]
-    X -->|No| Z
+    W --> Z5[Complete-ProjectExecution]
+    Z4 --> Z5
 ```
 
 ## Module layout
@@ -83,9 +87,10 @@ isolation with mocked Graph cmdlets.
    sets without issuing extra Graph calls. When a serial exists in Autopilot,
    the row set is expanded to include every related Entra and Intune object for
    that same serial; otherwise duplicate serials remain `Ambiguous` and are left
-   untouched.
-6. If changes are permitted, active stale candidates remove Autopilot when
-   applicable and then disable Entra. Disabled candidates are removed only
-   after `DaysDisabled` has elapsed. A Graph `AlreadyDeleted` response
-   confirms the Autopilot step; repeated `DeletionInProgress` responses block
-   both Entra actions.
+   untouched. This branch is validated for mode/confirmation before it exits
+   early and never enters the standard stale lifecycle.
+6. If changes are permitted and the scrapped-device branch is not active, active
+   stale candidates remove Autopilot when applicable and then disable Entra.
+   Disabled candidates are removed only after `DaysDisabled` has elapsed. A Graph
+   `AlreadyDeleted` response confirms the Autopilot step; repeated
+   `DeletionInProgress` responses block both Entra actions.
