@@ -188,6 +188,11 @@ otherwise be excluded as "recent activity detected":
   -ScrappedDeviceCsvPath '.\src\SkrotadeDatorer.csv'
 ```
 
+Repeated CSV rows are removed case-insensitively before correlation, preserving
+the first occurrence and file order. The summary reports how many duplicate
+rows were ignored; blank rows and the optional header are not counted as
+duplicates.
+
 Every serial number that resolves to a Windows Autopilot identity, an Intune
 managed device, and/or an Entra device object is removed from all relevant
 objects in those systems — regardless of activity, disabled-state, or
@@ -202,9 +207,11 @@ records, and it only ever acts on the serial numbers you explicitly listed.
 It follows the same Mode/`-WhatIf`/`-ConfirmDeletion` gating, and the same
 Autopilot-before-Entra safety order, as the rest of the tool. Because it is a
 separate early branch, it does not run the standard stale-device lifecycle for
-that same execution. The `ScrappedDeviceResults.csv` report is structured to
-show the exact objects that will be removed for each serial, not a tenant-wide
-summary that mixes in other stale-device candidates.
+that same execution. Before confirmation, the console shows the unique input
+and matched serial counts, the exact unique Autopilot, Intune, and Entra object
+counts targeted for removal, and the ambiguous/not-found exclusions. The
+`ScrappedDeviceResults.csv` report is written before that summary and contains
+the corresponding object-level details.
 
 ## Protected-device configuration
 

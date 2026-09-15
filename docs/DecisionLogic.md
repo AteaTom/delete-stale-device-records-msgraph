@@ -81,6 +81,10 @@ input, resolves them only against the already-discovered Entra, Intune, and
 Autopilot records, and then exits early before the standard stale-device
 lifecycle executes for that run.
 
+CSV serials are deduplicated case-insensitively before correlation. The first
+occurrence and its casing are preserved; each later occurrence is ignored and
+counted as a duplicate CSV row in the summary.
+
 - If a serial exists in Windows Autopilot, Autopilot is treated as the
   authority for that serial.
 - In that case, the script expands the match to every related Entra and Intune
@@ -94,7 +98,8 @@ lifecycle executes for that run.
 This rule ensures that a CSV containing a serial that is present in Autopilot
 never produces a misleading tenant-wide summary or a mixed-platform count.
 Instead, the scrapped-device summary shows the exact deletion targets for the
-serial that was supplied.
+serial that was supplied. It is displayed before interactive confirmation and
+deduplicates object IDs when counting Autopilot, Intune, and Entra removals.
 
 ## Decision precedence (evaluated in order per device)
 

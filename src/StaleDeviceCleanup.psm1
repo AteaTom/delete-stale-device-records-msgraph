@@ -817,6 +817,48 @@ function Show-CleanupSummary {
     Write-Host ''
 }
 
+function Show-ScrappedDeviceSummary {
+    <#
+        .SYNOPSIS
+        Displays the exact unique records targeted by the scrapped-device
+        workflow before deletion confirmation.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$ScrappedDeviceRecords,
+        [Parameter(Mandatory)][string]$OutputPath,
+        [ValidateRange(0, [int]::MaxValue)][int]$CsvDuplicateCount = 0
+    )
+
+    $inputSerials = @($ScrappedDeviceRecords | Select-Object -ExpandProperty NormalizedSerialNumber -Unique)
+    $matchedRecords = @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'Matched')
+    $matchedSerials = @($matchedRecords | Select-Object -ExpandProperty NormalizedSerialNumber -Unique)
+    $autopilotIds = @($matchedRecords | Where-Object AutopilotIdentityId | Select-Object -ExpandProperty AutopilotIdentityId -Unique)
+    $intuneIds = @($matchedRecords | Where-Object IntuneManagedDeviceId | Select-Object -ExpandProperty IntuneManagedDeviceId -Unique)
+    $entraIds = @($matchedRecords | Where-Object EntraObjectId | Select-Object -ExpandProperty EntraObjectId -Unique)
+    $ambiguousSerials = @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'Ambiguous' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique)
+    $notFoundSerials = @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'NotFound' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique)
+
+    Write-Host ''
+    Write-Host 'Scrapped-device cleanup summary'
+    Write-Host ("  Unique input serial numbers:   {0}" -f $inputSerials.Count)
+    Write-Host ("  Duplicate CSV rows ignored:    {0}" -f $CsvDuplicateCount)
+    Write-Host ("  Matched serial numbers:        {0}" -f $matchedSerials.Count)
+    Write-Host ''
+    Write-Host 'Records to remove:'
+    Write-Host ("  Autopilot records:             {0}" -f $autopilotIds.Count)
+    Write-Host ("  Intune managed devices:        {0}" -f $intuneIds.Count)
+    Write-Host ("  Entra device objects:          {0}" -f $entraIds.Count)
+    Write-Host ''
+    Write-Host 'Excluded from deletion:'
+    Write-Host ("  Ambiguous serial numbers:      {0}" -f $ambiguousSerials.Count)
+    Write-Host ("  Serial numbers not found:      {0}" -f $notFoundSerials.Count)
+    Write-Host ''
+    Write-Host 'Reports have been written to:'
+    Write-Host "  $OutputPath"
+    Write-Host ''
+}
+
 function Request-DeletionConfirmation {
     <#
         .SYNOPSIS
@@ -999,7 +1041,8 @@ function Get-ScrappedDeviceSerialNumbers {
     [CmdletBinding()]
     [OutputType([string[]])]
     param(
-        [Parameter(Mandatory)][string]$Path
+        [Parameter(Mandatory)][string]$Path,
+        [ref]$Statistics
     )
 
     if (-not (Test-Path -LiteralPath $Path)) {
@@ -1009,6 +1052,7 @@ function Get-ScrappedDeviceSerialNumbers {
     $lines = @(Get-Content -LiteralPath $Path -ErrorAction Stop | Where-Object { $_ -and $_.Trim() })
     $serials = [System.Collections.Generic.List[string]]::new()
     $seen = @{}
+    $duplicateCount = 0
     foreach ($line in $lines) {
         $value = $line.Trim().Trim(',').Trim('"').Trim()
         if (-not $value) { continue }
@@ -1017,6 +1061,14 @@ function Get-ScrappedDeviceSerialNumbers {
         if (-not $seen.ContainsKey($key)) {
             $seen[$key] = $true
             $serials.Add($value)
+        } else {
+            $duplicateCount++
+        }
+    }
+    if ($Statistics) {
+        $Statistics.Value = [PSCustomObject][ordered]@{
+            UniqueSerialCount = $serials.Count
+            DuplicateRowCount = $duplicateCount
         }
     }
     return , $serials.ToArray()
@@ -1547,6 +1599,7 @@ Export-ModuleMember -Function @(
     'Test-DeviceProtection',
     'Get-StaleDeviceCandidates',
     'Show-CleanupSummary',
+    'Show-ScrappedDeviceSummary',
     'Request-DeletionConfirmation',
     'Export-ReportCsv',
     'Get-DeviceLifecycleState',

@@ -28,6 +28,7 @@
         'Test-DeviceProtection',
         'Get-StaleDeviceCandidates',
         'Show-CleanupSummary',
+        'Show-ScrappedDeviceSummary',
         'Request-DeletionConfirmation',
         'Export-ReportCsv',
         'Get-DeviceLifecycleState',

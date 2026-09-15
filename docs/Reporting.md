@@ -58,6 +58,14 @@ only unambiguous single matches are reported as `Matched`; duplicate serials
 without Autopilot authority remain `Ambiguous` and are never acted on.
 Only `Matched` rows are ever acted on.
 
+Before mode validation or an interactive deletion prompt, the console summary
+shows unique counts for input and matched serial numbers, the number of
+case-insensitive duplicate CSV rows ignored, exact unique Autopilot/Intune/Entra
+records to remove, and ambiguous/not-found serials. Blank rows and the optional
+header are excluded from the duplicate count.
+`ScrappedDeviceResults.csv` is written first so its object-level rows can be
+reviewed before confirmation.
+
 ## Reason codes
 
 `MissingAllActivity`, `UnsupportedPlatform`, `MissingOperatingSystem`,

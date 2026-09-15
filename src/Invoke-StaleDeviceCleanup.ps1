@@ -64,7 +64,9 @@
     matches a Windows Autopilot identity, Intune managed device, and/or
     Entra device object is removed from all three, independent of activity,
     disabled-state, or platform. Ambiguous (duplicate serial) or unmatched
-    entries are reported but never acted on. Subject to the same Mode/
+    entries are reported but never acted on. Duplicate rows in the input file
+    are ignored case-insensitively and counted in the pre-deletion summary.
+    Subject to the same Mode/
     -WhatIf/-ConfirmDeletion gating as the stale-device workflow; unlike the
     stale-device workflow, this is the one path that also removes Intune
     managed-device records.
@@ -216,16 +218,23 @@ try {
 
     $scrappedDeviceRecords = @()
     if ($ScrappedDeviceCsvPath) {
-        $scrappedSerialNumbers = Get-ScrappedDeviceSerialNumbers -Path $ScrappedDeviceCsvPath
-        Write-CleanupLog -Message "Loaded $($scrappedSerialNumbers.Count) scrapped device serial number(s) from '$ScrappedDeviceCsvPath'." -Level INFO -LogPath $logPath
+        $scrappedCsvStatistics = $null
+        $scrappedSerialNumbers = Get-ScrappedDeviceSerialNumbers -Path $ScrappedDeviceCsvPath -Statistics ([ref]$scrappedCsvStatistics)
+        Write-CleanupLog -Message "Loaded $($scrappedSerialNumbers.Count) unique scrapped device serial number(s) from '$ScrappedDeviceCsvPath'; ignored $($scrappedCsvStatistics.DuplicateRowCount) duplicate CSV row(s)." -Level INFO -LogPath $logPath
         $scrappedDeviceRecords = Resolve-ScrappedDeviceRecords -SerialNumbers $scrappedSerialNumbers -EntraDevices $entraDevices `
             -IntuneDevices $intuneDevices -AutopilotDevices $autopilotDevices -RunId $runId
-        $scrappedMatched = @($scrappedDeviceRecords | Where-Object MatchStatus -eq 'Matched').Count
-        $scrappedAmbiguous = @($scrappedDeviceRecords | Where-Object MatchStatus -eq 'Ambiguous').Count
-        $scrappedNotFound = @($scrappedDeviceRecords | Where-Object MatchStatus -eq 'NotFound').Count
-        Write-CleanupLog -Message "Scrapped device resolution: Matched=$scrappedMatched Ambiguous=$scrappedAmbiguous NotFound=$scrappedNotFound." -Level INFO -LogPath $logPath
+        $scrappedMatchedRecords = @($scrappedDeviceRecords | Where-Object MatchStatus -eq 'Matched')
+        $scrappedMatched = @($scrappedMatchedRecords | Select-Object -ExpandProperty NormalizedSerialNumber -Unique).Count
+        $scrappedAmbiguous = @($scrappedDeviceRecords | Where-Object MatchStatus -eq 'Ambiguous' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique).Count
+        $scrappedNotFound = @($scrappedDeviceRecords | Where-Object MatchStatus -eq 'NotFound' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique).Count
+        $scrappedAutopilotTargets = @($scrappedMatchedRecords | Where-Object AutopilotIdentityId | Select-Object -ExpandProperty AutopilotIdentityId -Unique).Count
+        $scrappedIntuneTargets = @($scrappedMatchedRecords | Where-Object IntuneManagedDeviceId | Select-Object -ExpandProperty IntuneManagedDeviceId -Unique).Count
+        $scrappedEntraTargets = @($scrappedMatchedRecords | Where-Object EntraObjectId | Select-Object -ExpandProperty EntraObjectId -Unique).Count
+        Write-CleanupLog -Message "Scrapped device resolution: InputSerials=$($scrappedSerialNumbers.Count) MatchedSerials=$scrappedMatched AmbiguousSerials=$scrappedAmbiguous NotFoundSerials=$scrappedNotFound; AutopilotTargets=$scrappedAutopilotTargets IntuneTargets=$scrappedIntuneTargets EntraTargets=$scrappedEntraTargets." -Level INFO -LogPath $logPath
 
         Export-ReportCsv -InputObject $scrappedDeviceRecords -Path (Join-Path $resolvedOutputPath 'ScrappedDeviceResults.csv')
+        Show-ScrappedDeviceSummary -ScrappedDeviceRecords $scrappedDeviceRecords -OutputPath $resolvedOutputPath `
+            -CsvDuplicateCount $scrappedCsvStatistics.DuplicateRowCount
 
         switch ($Mode) {
             'Audit' {

@@ -24,8 +24,11 @@ Describe 'Get-ScrappedDeviceSerialNumbers' {
 
     It 'trims whitespace, skips blank lines, and de-duplicates case-insensitively' {
         Set-Content -LiteralPath $script:csvPath -Value @('  5CD3271HSD  ', '', '5cd3271hsd', '5CD8245V12')
-        $result = Get-ScrappedDeviceSerialNumbers -Path $script:csvPath
+        $statistics = $null
+        $result = Get-ScrappedDeviceSerialNumbers -Path $script:csvPath -Statistics ([ref]$statistics)
         $result | Should -Be @('5CD3271HSD', '5CD8245V12')
+        $statistics.UniqueSerialCount | Should -Be 2
+        $statistics.DuplicateRowCount | Should -Be 1
     }
 
     It 'skips an optional header row' {
@@ -93,6 +96,30 @@ Describe 'Resolve-ScrappedDeviceRecords' {
             -IntuneDevices @($script:intuneDevice) -AutopilotDevices @($script:autopilotDevice) -RunId 'r1'
 
         $result[0].MatchStatus | Should -Be 'NotFound'
+    }
+}
+
+Describe 'Show-ScrappedDeviceSummary' {
+    It 'shows unique target counts without inflating repeated correlation rows' {
+        $records = @(
+            [PSCustomObject]@{ NormalizedSerialNumber = 'serial1'; MatchStatus = 'Matched'; AutopilotIdentityId = 'ap1'; IntuneManagedDeviceId = $null; EntraObjectId = $null },
+            [PSCustomObject]@{ NormalizedSerialNumber = 'serial1'; MatchStatus = 'Matched'; AutopilotIdentityId = 'ap1'; IntuneManagedDeviceId = 'intune1'; EntraObjectId = $null },
+            [PSCustomObject]@{ NormalizedSerialNumber = 'serial1'; MatchStatus = 'Matched'; AutopilotIdentityId = 'ap1'; IntuneManagedDeviceId = $null; EntraObjectId = 'entra1' },
+            [PSCustomObject]@{ NormalizedSerialNumber = 'serial2'; MatchStatus = 'Ambiguous'; AutopilotIdentityId = $null; IntuneManagedDeviceId = $null; EntraObjectId = $null },
+            [PSCustomObject]@{ NormalizedSerialNumber = 'serial3'; MatchStatus = 'NotFound'; AutopilotIdentityId = $null; IntuneManagedDeviceId = $null; EntraObjectId = $null }
+        )
+        Mock -CommandName Write-Host -ModuleName StaleDeviceCleanup -MockWith { }
+
+        Show-ScrappedDeviceSummary -ScrappedDeviceRecords $records -OutputPath 'C:\reports' -CsvDuplicateCount 2
+
+        Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Unique input serial numbers:   3' }
+        Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Duplicate CSV rows ignored:    2' }
+        Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Matched serial numbers:        1' }
+        Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Autopilot records:             1' }
+        Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Intune managed devices:        1' }
+        Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Entra device objects:          1' }
+        Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Ambiguous serial numbers:      1' }
+        Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Serial numbers not found:      1' }
     }
 }
 

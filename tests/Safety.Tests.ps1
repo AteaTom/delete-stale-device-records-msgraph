@@ -171,4 +171,89 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
         $runFolder = Get-ChildItem -Path $script:runOutputPath -Directory | Select-Object -First 1
         Test-Path (Join-Path $runFolder.FullName 'DeletionCandidates.csv') | Should -Be $true
     }
+
+    It 'executes the scrapped-device branch and exits before running the stale lifecycle flow when the CSV path is supplied' {
+        $scrappedPath = Join-Path ([System.IO.Path]::GetTempPath()) "scrapped-branch-$(New-Guid).csv"
+        Set-Content -LiteralPath $scrappedPath -Value @('5CD3271HSD')
+
+        Mock -CommandName Get-MgContext -ModuleName StaleDeviceCleanup -MockWith {
+            [PSCustomObject]@{
+                TenantId = 'tenant1'
+                AuthType = 'Delegated'
+                Scopes = @(
+                    'Device.Read.All',
+                    'DeviceManagementManagedDevices.Read.All',
+                    'DeviceManagementServiceConfig.Read.All',
+                    'Device.ReadWrite.All',
+                    'DeviceManagementManagedDevices.ReadWrite.All',
+                    'DeviceManagementServiceConfig.ReadWrite.All'
+                )
+            }
+        }
+        Mock -CommandName Get-MgDevice -ModuleName StaleDeviceCleanup -MockWith {
+            @((New-TestEntraDevice -Id 'obj1' -DeviceId 'dev1' -DisplayName 'STALE-WIN01' -ApproximateLastSignInDateTime (Get-Date).ToUniversalTime().AddDays(-300)))
+        }
+        Mock -CommandName Get-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -MockWith {
+            @([PSCustomObject]@{ Id = 'ap1'; AzureActiveDirectoryDeviceId = 'dev1'; ManagedDeviceId = 'intune1'; SerialNumber = '5CD3271HSD'; EnrollmentState = 'enrolled' })
+        }
+        Mock -CommandName Get-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -MockWith {
+            @([PSCustomObject]@{ Id = 'intune1'; AzureAdDeviceId = 'dev1'; SerialNumber = '5CD3271HSD'; DeviceName = 'STALE-WIN01' })
+        }
+        Mock -CommandName Update-MgDevice -ModuleName StaleDeviceCleanup -MockWith { }
+        Mock -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -MockWith { }
+        Mock -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -MockWith { }
+        Mock -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -MockWith {
+            throw [System.Exception]::new('ZtdDeviceAlreadyDeleted: already been deleted')
+        }
+
+        & $script:scriptPath -Mode Automatic -DaysInactive 180 -OutputPath $script:runOutputPath -ConfirmDeletion -ScrappedDeviceCsvPath $scrappedPath
+
+        Assert-MockCalled -CommandName Update-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+        Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $DeviceId -eq 'obj1' }
+        Assert-MockCalled -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 1
+        Assert-MockCalled -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 1
+
+        Remove-Item -Path $scrappedPath -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'shows the scrapped-device summary before interactive deletion confirmation' {
+        $scrappedPath = Join-Path ([System.IO.Path]::GetTempPath()) "scrapped-summary-$(New-Guid).csv"
+        Set-Content -LiteralPath $scrappedPath -Value @('5CD3271HSD', '5cd3271hsd')
+        $global:scrappedSummaryShown = $false
+
+        Mock -CommandName Get-MgContext -ModuleName StaleDeviceCleanup -MockWith {
+            [PSCustomObject]@{
+                TenantId = 'tenant1'
+                AuthType = 'Delegated'
+                Scopes = @(
+                    'Device.Read.All',
+                    'DeviceManagementManagedDevices.Read.All',
+                    'DeviceManagementServiceConfig.Read.All',
+                    'Device.ReadWrite.All',
+                    'DeviceManagementManagedDevices.ReadWrite.All',
+                    'DeviceManagementServiceConfig.ReadWrite.All'
+                )
+            }
+        }
+        Mock -CommandName Get-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -MockWith {
+            @([PSCustomObject]@{ Id = 'ap1'; AzureActiveDirectoryDeviceId = 'dev1'; ManagedDeviceId = $null; SerialNumber = '5CD3271HSD'; EnrollmentState = 'enrolled' })
+        }
+        Mock -CommandName Write-Host -ModuleName StaleDeviceCleanup -ParameterFilter { $Object -eq 'Scrapped-device cleanup summary' } -MockWith {
+            $global:scrappedSummaryShown = $true
+        }
+        Mock -CommandName Write-Host -ModuleName StaleDeviceCleanup -ParameterFilter { $Object -eq '  Duplicate CSV rows ignored:    1' } -MockWith { }
+        Mock -CommandName Read-Host -ModuleName StaleDeviceCleanup -MockWith {
+            $global:scrappedSummaryShown | Should -BeTrue
+            return ''
+        }
+
+        & $script:scriptPath -Mode Interactive -DaysInactive 180 -OutputPath $script:runOutputPath -ScrappedDeviceCsvPath $scrappedPath
+
+        Assert-MockCalled -CommandName Read-Host -ModuleName StaleDeviceCleanup -Times 1
+        Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Duplicate CSV rows ignored:    1' }
+        Assert-MockCalled -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 0
+
+        Remove-Variable -Name scrappedSummaryShown -Scope Global -ErrorAction SilentlyContinue
+        Remove-Item -Path $scrappedPath -Force -ErrorAction SilentlyContinue
+    }
 }

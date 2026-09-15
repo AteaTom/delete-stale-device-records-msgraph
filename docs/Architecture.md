@@ -18,9 +18,11 @@ flowchart TD
     G --> H
     H --> X{ScrappedDeviceCsvPath supplied?}
     X -->|Yes| Y[Resolve-ScrappedDeviceRecords]
-    Y --> Z1[Validate mode / confirmation]
+   Y --> Y1[Export initial ScrappedDeviceResults.csv]
+   Y1 --> Y2[Show-ScrappedDeviceSummary]
+   Y2 --> Z1[Validate mode / confirmation]
     Z1 --> Z2[Invoke-ScrappedDeviceRemoval]
-    Z2 --> Z3[Export ScrappedDeviceResults.csv]
+   Z2 --> Z3[Update ScrappedDeviceResults.csv]
     Z3 --> Z4[Return early: do not run stale lifecycle]
     X -->|No| I[Get-StaleDeviceCandidates]
     I --> J[Export-CleanupReports]
@@ -60,7 +62,7 @@ All logic lives in `src/StaleDeviceCleanup.psm1`, organized by `#region`:
 | Activity evaluation | `Get-EffectiveLastActivity` |
 | Protection | `Test-DeviceProtection` |
 | Evaluation orchestration | `Get-StaleDeviceCandidates` – produces one evaluated record per Entra device |
-| Summary and confirmation | `Show-CleanupSummary`, `Request-DeletionConfirmation` |
+| Summary and confirmation | `Show-CleanupSummary`, `Show-ScrappedDeviceSummary`, `Request-DeletionConfirmation` |
 | Reporting | `Export-CleanupReports`, `New-RunSummary` |
 | Lifecycle state | `Get-DeviceLifecycleState` / `Save-DeviceLifecycleState` – persists the first observed disabled timestamp |
 | Scrapped device cleanup | `Get-ScrappedDeviceSerialNumbers`, `Resolve-ScrappedDeviceRecords` – correlate `-ScrappedDeviceCsvPath` serial numbers against already-discovered Entra/Intune/Autopilot data, no extra Graph calls |
@@ -87,8 +89,9 @@ isolation with mocked Graph cmdlets.
    sets without issuing extra Graph calls. When a serial exists in Autopilot,
    the row set is expanded to include every related Entra and Intune object for
    that same serial; otherwise duplicate serials remain `Ambiguous` and are left
-   untouched. This branch is validated for mode/confirmation before it exits
-   early and never enters the standard stale lifecycle.
+   untouched. The initial report and exact unique-object summary are produced
+   before mode validation or an interactive confirmation prompt. This branch
+   then exits early and never enters the standard stale lifecycle.
 6. If changes are permitted and the scrapped-device branch is not active, active
    stale candidates remove Autopilot when applicable and then disable Entra.
    Disabled candidates are removed only after `DaysDisabled` has elapsed. A Graph
