@@ -19,11 +19,21 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Replace production use of the unsupported Autopilot `deleteDevices` action
+  with individual Windows Autopilot identity DELETE requests. The bulk helper
+  remains only for isolated diagnostics/tests; stale and scrapped workflows no
+  longer depend on its route existing in the tenant.
 - Serialize Autopilot bulk request bodies to explicit JSON before calling
   `Invoke-MgGraphRequest`, preventing PowerShell's adapted string properties
   from causing a self-referencing serialization loop.
 - Count scrapped-device completion and run-summary outcomes by unique serial or
   object ID instead of expanded report rows, and log each failed serial once.
+- Persist partial lifecycle state and rewrite reports during finalization so an
+  interrupted destructive run cannot lose successful disable timestamps or
+  report exit code 0 with unprocessed candidates.
+- Adaptively split Autopilot chunks that return `400 Bad Request` and stop after
+  five consecutive single-serial failures to isolate bad input without causing
+  an unbounded request storm. Include Graph response details in error logs.
 - Replace serial, per-device Autopilot DELETE confirmation in the
   scrapped-device and stale-device workflows with Microsoft's v1.0
   `deleteDevices` bulk action. Unique Intune records are removed first in the

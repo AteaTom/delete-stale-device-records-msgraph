@@ -104,13 +104,12 @@ deduplicates object IDs when counting Autopilot, Intune, and Entra removals.
 After confirmation, the scrapped-device operation follows this order:
 
 1. Remove each unique matched Intune managed-device record once.
-2. Submit every unique Autopilot serial number once through Microsoft Graph's
-   v1.0 `windowsAutopilotDeviceIdentities/deleteDevices` action, using
-   sequential chunks of at most 100 serial numbers.
-3. Treat `accepted` as a successful asynchronous submission and continue
-   without polling for the Autopilot record to disappear.
-4. Remove each unique related Entra object once. A `failed`, `error`, `unknown`,
-   or missing bulk result blocks Entra removal for that serial.
+2. Submit every unique Autopilot identity once through the supported identity
+   DELETE endpoint.
+3. Treat a successful response as an accepted asynchronous submission and
+   continue without polling for the Autopilot record to disappear.
+4. Remove each unique related Entra object once. A failed identity DELETE
+   blocks Entra removal for that identity's serial.
 
 ## Decision precedence (evaluated in order per device)
 
@@ -119,31 +118,22 @@ After confirmation, the scrapped-device operation follows this order:
 4. Protected by id/serial/name/pattern → **Excluded** (`ProtectedDevice`)
 5. Ambiguous correlation → **ManualReview** (`AmbiguousAutopilotMatch` / `DuplicateSerialNumber`)
 6. Windows device with a non-High-confidence Autopilot match → **ManualReview** (`LowConfidenceMatch`)
-7. Disabled device with no tracked timestamp, or below `DaysDisabled` → **Excluded** (`DisabledTracking`)
-8. Disabled device at or beyond `DaysDisabled` → **Candidate** (`DisabledForThreshold`, action `Remove`)
-9. No authoritative activity timestamp at all → **ManualReview** (`MissingAllActivity`)
-10. Effective last activity newer than cutoff → **Excluded** (`RecentActivityDetected`)
-11. On-premises synchronized, override not set → **Excluded** (`ProtectedDevice`)
-12. Otherwise → **Candidate** (`Stale`, action `Disable`)
+7. No authoritative activity timestamp at all → **ManualReview** (`MissingAllActivity`)
+8. Effective last activity newer than cutoff → **Excluded** (`RecentActivityDetected`)
+9. On-premises synchronized, override not set → **Excluded** (`ProtectedDevice`)
+10. Otherwise → **Candidate** (`Stale`, action `Remove`)
 
 ## Lifecycle order
 
-The script stores disabled timestamps in `DeviceLifecycleState.json` under the
-configured output root. Entra `device` objects expose `accountEnabled`, but do
-not expose a reliable disabled-at timestamp, so the ledger is required to
-calculate `DaysDisabled`.
+`DeviceLifecycleState.json` is retained for compatibility and reporting. Direct
+Entra removal is direct after the safety checks and does not depend on a
+disabled timestamp or retention gate.
 
 For each lifecycle `Candidate`:
 
 1. For Windows with Autopilot and `MatchConfidence = High`, submit each unique
-   serial once through the Graph v1.0 `deleteDevices` bulk action in sequential
-   chunks of at most 100.
-2. If Graph returns `accepted`, a stale active device (`EntraAction = Disable`)
-   is updated with `accountEnabled = false` and its disable timestamp is saved.
-3. If an eligible disabled device still has an Autopilot record, mark Entra
-   removal `PendingAutopilotRemoval`; do not permanently delete it in that run.
-4. On a later run where discovery no longer finds Autopilot, remove the
-   eligible disabled Entra object and delete its state entry.
-5. If bulk submission fails or has no usable result, skip the Entra action,
+   Autopilot identity once through the identity DELETE endpoint.
+2. If the DELETE succeeds, remove the related Entra object directly.
+3. If the identity DELETE fails, skip the Entra action,
    record the failure, and continue processing.
-6. iOS and Android candidates are never sent to the Autopilot bulk action.
+4. iOS and Android candidates are never sent to an Autopilot DELETE.

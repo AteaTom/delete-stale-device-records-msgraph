@@ -82,7 +82,7 @@ Describe 'New-RunSummary' {
     It 'counts an accepted Autopilot submission separately from completed removal' {
         $device = [PSCustomObject]@{
             Decision = 'Candidate'
-            EntraRemovalStatus = 'PendingAutopilotRemoval'
+            EntraRemovalStatus = 'NotAttempted'
             AutopilotRemovalStatus = 'RemovalSubmitted'
             ErrorMessage = $null
         }

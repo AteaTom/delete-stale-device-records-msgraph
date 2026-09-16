@@ -32,45 +32,45 @@ when this occurs.
 
 Check `AutopilotRemovalStatus` and `EntraRemovalStatus` in
 `AllEvaluatedDevices.csv`. `AutopilotRemovalStatus = RemovalSubmitted` means
-Graph accepted asynchronous deletion. For an active stale object, Entra can be
-disabled immediately. For an eligible disabled object,
-`EntraRemovalStatus = PendingAutopilotRemoval` means permanent deletion is
-intentionally deferred. Run the tool again later; normal discovery must show
-that Autopilot is absent before Entra is permanently removed.
+The identity DELETE was accepted. Entra removal is attempted directly after
+that successful Autopilot operation; a failed identity DELETE blocks Entra.
 
 For `ScrappedDeviceResults.csv`, `RemovalSubmitted` means the v1.0 Autopilot
-bulk endpoint accepted the serial for asynchronous deletion. The script does
-not wait for the portal to synchronize. Microsoft notes that deregistration
-can take time; use **Sync** and **Refresh** in the Intune Autopilot devices view
-if the record remains visible. `RemovalFailed` means Graph rejected the bulk
-submission and the related Entra removal was intentionally skipped.
+identity DELETE accepted the removal request. The script does not wait for the
+portal to synchronize. Microsoft notes that deregistration can take time; use
+**Sync** and **Refresh** in the Intune Autopilot devices view if the record
+remains visible. `RemovalFailed` means the identity DELETE failed and the
+related Entra removal was intentionally skipped.
 
-Autopilot bulk submissions are split into sequential chunks of at most 100
-unique serial numbers. Transient Graph failures are retried per chunk. If one
-chunk still fails, its serials receive `RemovalFailed`, while later chunks
-continue and retain their own results.
+## RunSummary reports fewer disabled devices than the execution log
 
-## Autopilot bulk removal reports a self-referencing serialization loop
+This indicates that a destructive run ended before its normal completion
+checkpoint. Current versions always persist the in-memory lifecycle state and
+rewrite reports from `finally`. Unprocessed candidates receive an error, and
+the run exits with code 6 instead of reporting success. For an older affected
+run, recover successful IDs and their timestamps from `ExecutionLog.txt`
+before using the lifecycle state for retention decisions.
 
-Update to the latest project version. Older bulk-removal builds passed a
-PowerShell object directly to `Invoke-MgGraphRequest`, which could make the SDK
-inspect the adapted `Chars` property on strings and fail before any request
-reached Microsoft Graph. Current versions serialize a JSON request body
-explicitly and set `Content-Type: application/json`.
+Audit runs and cancelled Interactive runs do not persist newly tracked
+disabled-device timestamps. The lifecycle ledger is checkpointed only after a
+destructive confirmation, so pressing Enter at the confirmation prompt cannot
+change the next run's summary.
+
+## Autopilot removal reports a missing bulk route
+
+Current versions use the supported individual identity DELETE endpoint. Update
+to the latest project version before retrying.
 
 ## Entra devices are disabled instead of removed
 
-This is expected for a newly stale active device. The first eligible run sets
-`accountEnabled = false` and records the timestamp in
-`DeviceLifecycleState.json` under the configured output root. The device is
-not eligible for Entra removal until `DaysDisabled` has elapsed. Keep this
-file with the output root between scheduled runs; deleting it restarts the
-retention clock for already-disabled devices.
+Direct removal is expected for a stale device. Microsoft Entra keeps deleted
+device objects in its deleted-device recovery window, so accidental removals
+can be restored according to tenant retention policy. `DeviceLifecycleState.json`
+is no longer a 30-day deletion gate.
 
-`ExecutionLog.txt` records planned and completed counts for both actions. The
-same values are available in `RunSummary.json` as
-`TotalEntraDevicesToDisable`, `TotalEntraDevicesToRemove`,
-`TotalEntraDevicesDisabled`, and `TotalEntraDevicesRemoved`.
+`ExecutionLog.txt` records planned and completed removal counts. The same
+values are available in `RunSummary.json` as
+`TotalEntraDevicesToRemove` and `TotalEntraDevicesRemoved`.
 
 ## A scrapped-device serial number shows as Ambiguous or NotFound
 

@@ -154,6 +154,38 @@ function Test-GraphPermissions {
 
 #region Retry logic
 
+function Get-GraphErrorMessage {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    $messages = [System.Collections.Generic.List[string]]::new()
+    if ($ErrorRecord.Exception.Message) { $messages.Add($ErrorRecord.Exception.Message.Trim()) }
+    if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) {
+        $detail = $ErrorRecord.ErrorDetails.Message.Trim()
+        if ($detail -and -not $messages.Contains($detail)) { $messages.Add($detail) }
+    }
+
+    if ($ErrorRecord.Exception.PSObject.Properties['Response'] -and $ErrorRecord.Exception.Response) {
+        try {
+            $content = $ErrorRecord.Exception.Response.Content
+            if ($content) {
+                $responseBody = $content.ReadAsStringAsync().GetAwaiter().GetResult()
+                if ($responseBody) {
+                    $responseBody = $responseBody.Trim()
+                    if (-not $messages.Contains($responseBody)) { $messages.Add($responseBody) }
+                }
+            }
+        } catch {
+            Write-Verbose "Could not read Graph response body: $($_.Exception.Message)"
+        }
+    }
+
+    return ($messages -join ' | ')
+}
+
 function Invoke-GraphWithRetry {
     <#
         .SYNOPSIS
@@ -183,7 +215,7 @@ function Invoke-GraphWithRetry {
                 $statusCode = $errorRecord.Exception.ResponseStatusCode
             }
 
-            $message = $errorRecord.Exception.Message
+            $message = Get-GraphErrorMessage -ErrorRecord $errorRecord
             $isTransient = $false
             if ($statusCode -in 429, 503, 504) { $isTransient = $true }
             if ($message -match '429|Too Many Requests|503|Service Unavailable|504|Gateway Timeout') { $isTransient = $true }
@@ -628,8 +660,6 @@ function Get-StaleDeviceCandidates {
         [string[]]$ProtectedSerialNumbers = @(),
         [string[]]$ProtectedDeviceNames = @(),
         [string[]]$ProtectedNamePatterns = @(),
-        [hashtable]$DeviceLifecycleState = @{},
-        [int]$DaysDisabled = 30,
         [switch]$IncludeDisabledDevices,
         [switch]$AllowOnPremisesSyncedDeletion
     )
@@ -646,17 +676,6 @@ function Get-StaleDeviceCandidates {
         $entraSignInUtc = Get-SafeUtcTimestamp -Value $device.ApproximateLastSignInDateTime
 
         $activity = Get-EffectiveLastActivity -IntuneLastSyncDateTimeUtc $intuneLastSyncUtc -EntraApproximateLastSignInDateTimeUtc $entraSignInUtc
-
-        $disabledSinceUtc = $null
-        $daysDisabled = $null
-        $hasDisabledSince = $false
-        if ($device.AccountEnabled -eq $false -and $DeviceLifecycleState.ContainsKey([string]$device.Id)) {
-            $disabledSinceUtc = Get-SafeUtcTimestamp -Value $DeviceLifecycleState[[string]$device.Id]
-            if ($disabledSinceUtc) {
-                $daysDisabled = [Math]::Floor(($nowUtc - $disabledSinceUtc).TotalDays)
-                $hasDisabledSince = $true
-            }
-        }
 
         $protection = Test-DeviceProtection -Device $device -IntuneSerialNumber $intuneSerial `
             -ProtectedEntraObjectIds $ProtectedEntraObjectIds -ProtectedEntraDeviceIds $ProtectedEntraDeviceIds `
@@ -682,10 +701,6 @@ function Get-StaleDeviceCandidates {
             $reasonDescription = "Correlation is ambiguous: $($correlation.AmbiguityReason)."
         } elseif ($platform -eq 'Windows' -and $correlation.AutopilotMatch -and $correlation.MatchConfidence -ne 'High') {
             $decision = 'ManualReview'; $reasonCode = 'LowConfidenceMatch'; $reasonDescription = "Autopilot match confidence '$($correlation.MatchConfidence)' is below the High threshold required for automatic Autopilot deletion."
-        } elseif ($device.AccountEnabled -eq $false -and $hasDisabledSince -and $daysDisabled -ge $DaysDisabled) {
-            $decision = 'Candidate'; $reasonCode = 'DisabledForThreshold'; $reasonDescription = "Device has been disabled for at least $DaysDisabled day(s)."; $entraAction = 'Remove'
-        } elseif ($device.AccountEnabled -eq $false) {
-            $decision = 'Excluded'; $reasonCode = 'DisabledTracking'; $reasonDescription = 'Device is disabled and has not yet reached the configured disabled-device retention period.'
         } elseif (-not $activity.EffectiveLastActivityUtc) {
             $decision = 'ManualReview'; $reasonCode = 'MissingAllActivity'; $reasonDescription = 'No authoritative activity timestamp (Intune lastSyncDateTime or Entra approximateLastSignInDateTime) is available.'
         } elseif ($activity.EffectiveLastActivityUtc -gt $CutoffDateUtc) {
@@ -693,7 +708,7 @@ function Get-StaleDeviceCandidates {
         } elseif ($device.OnPremisesSyncEnabled -eq $true -and -not $AllowOnPremisesSyncedDeletion) {
             $decision = 'Excluded'; $reasonCode = 'ProtectedDevice'; $reasonDescription = 'Device is synchronized from on-premises Active Directory and is protected by default.'
         } else {
-            $decision = 'Candidate'; $reasonCode = 'Stale'; $reasonDescription = 'Effective last activity is older than or equal to the configured inactivity threshold.'; $entraAction = 'Disable'
+            $decision = 'Candidate'; $reasonCode = 'Stale'; $reasonDescription = 'Effective last activity is older than or equal to the configured inactivity threshold; the Entra device will be removed directly.'; $entraAction = 'Remove'
         }
 
         $daysInactive = $null
@@ -737,8 +752,7 @@ function Get-StaleDeviceCandidates {
             EffectiveLastActivityUtc                = $activity.EffectiveLastActivityUtc
             ActivitySource                          = $activity.ActivitySource
             DaysInactive                            = $daysInactive
-            DisabledSinceUtc                        = $disabledSinceUtc
-            DaysDisabled                            = $daysDisabled
+            DisabledSinceUtc                        = $null
             CutoffDateUtc                           = $CutoffDateUtc
             MatchStatus                             = $correlation.MatchStatus
             MatchMethod                              = $correlation.MatchMethod
@@ -774,7 +788,6 @@ function Show-CleanupSummary {
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$EvaluatedDevices,
         [Parameter(Mandatory)][datetime]$CutoffDateUtc,
         [Parameter(Mandatory)][int]$DaysInactive,
-        [int]$DaysDisabled = 30,
         [Parameter(Mandatory)][string]$OutputPath
     )
 
@@ -783,7 +796,6 @@ function Show-CleanupSummary {
     $windowsWithoutAutopilot = @($candidates | Where-Object { $_.Platform -eq 'Windows' -and -not $_.AutopilotPresent })
     $ios = @($candidates | Where-Object Platform -eq 'iOS')
     $android = @($candidates | Where-Object Platform -eq 'Android')
-    $toDisable = @($candidates | Where-Object EntraAction -eq 'Disable')
     $toRemove = @($candidates | Where-Object EntraAction -eq 'Remove')
 
     $excluded = $EvaluatedDevices | Where-Object Decision -eq 'Excluded'
@@ -793,14 +805,12 @@ function Show-CleanupSummary {
     Write-Host 'Stale-device cleanup summary'
     Write-Host "Cutoff date UTC: $($CutoffDateUtc.ToString('o'))"
     Write-Host "Inactivity threshold: $DaysInactive days"
-    Write-Host "Disabled-device retention: $DaysDisabled days"
     Write-Host ''
     Write-Host 'Deletion candidates:'
     Write-Host ("  Windows with Autopilot:       {0}" -f $windowsWithAutopilot.Count)
     Write-Host ("  Windows without Autopilot:    {0}" -f $windowsWithoutAutopilot.Count)
     Write-Host ("  iOS:                          {0}" -f $ios.Count)
     Write-Host ("  Android:                      {0}" -f $android.Count)
-    Write-Host ("  Entra objects to disable:     {0}" -f $toDisable.Count)
     Write-Host ("  Entra objects to remove:      {0}" -f $toRemove.Count)
     Write-Host ("  Autopilot records to remove:  {0}" -f $windowsWithAutopilot.Count)
     Write-Host ''
@@ -899,49 +909,6 @@ function Export-ReportCsv {
     }
 }
 
-function Get-DeviceLifecycleState {
-    [CmdletBinding()]
-    [OutputType([hashtable])]
-    param(
-        [Parameter(Mandatory)][string]$StatePath
-    )
-
-    $state = @{}
-    if (-not (Test-Path -LiteralPath $StatePath)) {
-        return $state
-    }
-
-    $content = Get-Content -LiteralPath $StatePath -Raw -ErrorAction Stop
-    if ([string]::IsNullOrWhiteSpace($content)) {
-        return $state
-    }
-
-    $parsed = $content | ConvertFrom-Json -ErrorAction Stop
-    foreach ($property in $parsed.PSObject.Properties) {
-        $state[$property.Name] = [string]$property.Value.DisabledSinceUtc
-    }
-    return $state
-}
-
-function Save-DeviceLifecycleState {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][hashtable]$State,
-        [Parameter(Mandatory)][string]$StatePath
-    )
-
-    $parentPath = Split-Path -Parent $StatePath
-    if ($parentPath) {
-        New-Item -Path $parentPath -ItemType Directory -Force | Out-Null
-    }
-
-    $serialized = [ordered]@{}
-    foreach ($key in ($State.Keys | Sort-Object)) {
-        $serialized[$key] = [ordered]@{ DisabledSinceUtc = $State[$key] }
-    }
-    $serialized | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $StatePath -Encoding utf8
-}
-
 function Export-CleanupReports {
     <#
         .SYNOPSIS
@@ -984,7 +951,6 @@ function New-RunSummary {
         [datetime]$EndTimeUtc = (Get-Date).ToUniversalTime(),
         [Parameter(Mandatory)][datetime]$CutoffDateUtc,
         [Parameter(Mandatory)][int]$DaysInactive,
-        [int]$DaysDisabled = 30,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$AllEvaluatedDevices,
         [AllowEmptyCollection()][object[]]$ScrappedDeviceRecords = @(),
         [bool]$WhatIfMode = $false,
@@ -996,9 +962,7 @@ function New-RunSummary {
     $candidates = @($AllEvaluatedDevices | Where-Object Decision -eq 'Candidate')
     $excluded = @($AllEvaluatedDevices | Where-Object Decision -eq 'Excluded')
     $manualReview = @($AllEvaluatedDevices | Where-Object Decision -eq 'ManualReview')
-    $toDisable = @($AllEvaluatedDevices | Where-Object { $_.Decision -eq 'Candidate' -and $_.PSObject.Properties['EntraAction'] -and $_.EntraAction -eq 'Disable' })
     $toRemove = @($AllEvaluatedDevices | Where-Object { $_.Decision -eq 'Candidate' -and $_.PSObject.Properties['EntraAction'] -and $_.EntraAction -eq 'Remove' })
-    $disabledEntra = @($AllEvaluatedDevices | Where-Object { $_.PSObject.Properties['EntraDisableStatus'] -and $_.EntraDisableStatus -eq 'Disabled' })
     $deletedEntra = @($AllEvaluatedDevices | Where-Object EntraRemovalStatus -eq 'Removed')
     $deletedAutopilot = @($AllEvaluatedDevices | Where-Object AutopilotRemovalStatus -in 'Removed', 'AlreadyRemoved')
     $submittedAutopilot = @($AllEvaluatedDevices | Where-Object AutopilotRemovalStatus -eq 'RemovalSubmitted')
@@ -1020,15 +984,12 @@ function New-RunSummary {
         EndTimeUtc                = $EndTimeUtc.ToString('o')
         CutoffDateUtc             = $CutoffDateUtc.ToString('o')
         DaysInactiveThreshold     = $DaysInactive
-        DaysDisabledThreshold     = $DaysDisabled
         DiscoveryComplete         = $DiscoveryComplete
         TotalEvaluated            = $AllEvaluatedDevices.Count
         TotalCandidates           = $candidates.Count
         TotalExcluded             = $excluded.Count
         TotalManualReview         = $manualReview.Count
-        TotalEntraDevicesToDisable = $toDisable.Count
         TotalEntraDevicesToRemove  = $toRemove.Count
-        TotalEntraDevicesDisabled  = $disabledEntra.Count
         TotalEntraDevicesRemoved  = $deletedEntra.Count
         TotalAutopilotRemoved     = $deletedAutopilot.Count
         TotalAutopilotRemovalSubmitted = $submittedAutopilot.Count
@@ -1309,24 +1270,6 @@ function Resolve-ScrappedDeviceRecords {
 
 #region Deletion (guarded by ShouldProcess)
 
-function Disable-EntraDeviceRecord {
-    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
-    [OutputType([bool])]
-    param(
-        [Parameter(Mandatory)][string]$EntraObjectId,
-        [string]$LogPath
-    )
-
-    if ($PSCmdlet.ShouldProcess($EntraObjectId, 'Disable Microsoft Entra ID device object')) {
-        $body = @{ accountEnabled = $false }
-        Invoke-GraphWithRetry -OperationName 'Update-MgDevice' -LogPath $LogPath -ScriptBlock {
-            Update-MgDevice -DeviceId $EntraObjectId -BodyParameter $body -ErrorAction Stop
-        }
-        return $true
-    }
-    return $false
-}
-
 function Remove-WindowsAutopilotRecord {
     <#
         .SYNOPSIS
@@ -1350,33 +1293,45 @@ function Remove-WindowsAutopilotRecord {
     return $false
 }
 
-function Wait-WindowsAutopilotRemoval {
-    <#
-        .SYNOPSIS
-        Polls Graph with bounded, increasing delay until the Autopilot
-        identity is confirmed removed (Graph returns not-found), or gives up.
-    #>
-    [CmdletBinding()]
-    [OutputType([bool])]
+function Submit-WindowsAutopilotIdentityRemoval {
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+    [OutputType([object[]])]
     param(
-        [Parameter(Mandatory)][string]$WindowsAutopilotDeviceIdentityId,
-        [int]$MaxAttempts = 6,
-        [int]$InitialDelaySeconds = 5,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Targets,
         [string]$LogPath
     )
 
-    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
-        $delay = [Math]::Min(60, $InitialDelaySeconds * [Math]::Pow(2, $attempt - 1))
-        Start-Sleep -Seconds $delay
-        try {
-            Get-MgDeviceManagementWindowsAutopilotDeviceIdentity -WindowsAutopilotDeviceIdentityId $WindowsAutopilotDeviceIdentityId -ErrorAction Stop | Out-Null
-            if ($LogPath) { Write-CleanupLog -Message "Autopilot identity '$WindowsAutopilotDeviceIdentityId' still present after attempt $attempt of $MaxAttempts." -Level DEBUG -LogPath $LogPath }
-        } catch {
-            if ($LogPath) { Write-CleanupLog -Message "Autopilot identity '$WindowsAutopilotDeviceIdentityId' confirmed removed after attempt $attempt." -Level SUCCESS -LogPath $LogPath }
-            return $true
+    $seenIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $results = [System.Collections.Generic.List[object]]::new()
+    foreach ($target in $Targets) {
+        if (-not $target.IdentityId -or -not $seenIds.Add([string]$target.IdentityId)) { continue }
+        $status = 'RemovalFailed'
+        $errorMessage = $null
+        if ($PSCmdlet.ShouldProcess($target.IdentityId, 'Remove Windows Autopilot device identity')) {
+            try {
+                Remove-WindowsAutopilotRecord -WindowsAutopilotDeviceIdentityId $target.IdentityId -LogPath $LogPath -SuppressErrorLog -Confirm:$false | Out-Null
+                $status = 'RemovalSubmitted'
+            } catch {
+                $errorMessage = Get-GraphErrorMessage -ErrorRecord $_
+                if ($errorMessage -match 'ZtdDeviceAlreadyDeleted|already been deleted') {
+                    $status = 'AlreadyRemoved'
+                    $errorMessage = $null
+                    if ($LogPath) { Write-CleanupLog -Message "Autopilot identity '$($target.IdentityId)' was already removed; continuing safely." -Level INFO -LogPath $LogPath }
+                } elseif ($LogPath) {
+                    Write-CleanupLog -Message "Autopilot identity '$($target.IdentityId)' removal failed: $errorMessage" -Level ERROR -LogPath $LogPath
+                }
+            }
+        } else {
+            $status = 'WhatIf'
         }
+        $results.Add([PSCustomObject][ordered]@{
+                IdentityId   = [string]$target.IdentityId
+                SerialNumber = [string]$target.SerialNumber
+                Status       = $status
+                ErrorMessage = $errorMessage
+            })
     }
-    return $false
+    return $results.ToArray()
 }
 
 function Remove-EntraDeviceRecord {
@@ -1426,86 +1381,6 @@ function Remove-IntuneManagedDeviceRecord {
     return $false
 }
 
-function Submit-WindowsAutopilotBulkRemoval {
-    <#
-        .SYNOPSIS
-        Submits unique serial numbers to the Microsoft Graph Autopilot
-        deleteDevices action in sequential chunks and returns its per-device
-        states. A failed chunk is converted to per-serial error states so later
-        chunks can still be processed.
-    #>
-    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
-    [OutputType([object[]])]
-    param(
-        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$SerialNumbers,
-        [string]$LogPath,
-        [ValidateRange(1, 1000)][int]$BatchSize = 100
-    )
-
-    $uniqueSerialNumbers = @($SerialNumbers | Where-Object { $_ } | Select-Object -Unique)
-    if ($uniqueSerialNumbers.Count -eq 0) { return @() }
-
-    $target = "$($uniqueSerialNumbers.Count) unique serial number(s)"
-    if (-not $PSCmdlet.ShouldProcess($target, 'Submit bulk Windows Autopilot device removal')) {
-        return @()
-    }
-
-    $normalizedStates = [System.Collections.Generic.List[object]]::new()
-    $batchCount = [Math]::Ceiling($uniqueSerialNumbers.Count / [double]$BatchSize)
-    for ($batchIndex = 0; $batchIndex -lt $batchCount; $batchIndex++) {
-        $startIndex = $batchIndex * $BatchSize
-        $endIndex = [Math]::Min($startIndex + $BatchSize - 1, $uniqueSerialNumbers.Count - 1)
-        $serialNumberBatch = @($uniqueSerialNumbers[$startIndex..$endIndex] | ForEach-Object { [string]$_ })
-        $requestBody = @{ serialNumbers = [string[]]$serialNumberBatch } | ConvertTo-Json -Compress
-        Write-CleanupLog -Message "Submitting Autopilot bulk removal chunk $($batchIndex + 1) of $batchCount with $($serialNumberBatch.Count) serial number(s)." -Level INFO -LogPath $LogPath
-
-        try {
-            $response = Invoke-GraphWithRetry -OperationName "Bulk remove Windows Autopilot device identities (chunk $($batchIndex + 1) of $batchCount)" -LogPath $LogPath -ScriptBlock {
-                Invoke-MgGraphRequest -Method POST `
-                    -Uri 'https://graph.microsoft.com/v1.0/deviceManagement/windowsAutopilotDeviceIdentities/deleteDevices' `
-                    -Body $requestBody -ContentType 'application/json' -ErrorAction Stop
-            }
-        } catch {
-            $chunkError = $_.Exception.Message
-            Write-CleanupLog -Message "Autopilot bulk removal chunk $($batchIndex + 1) of $batchCount failed: $chunkError" -Level ERROR -LogPath $LogPath
-            foreach ($serialNumber in $serialNumberBatch) {
-                $normalizedStates.Add([PSCustomObject][ordered]@{
-                        SerialNumber         = $serialNumber
-                        DeviceRegistrationId = $null
-                        DeletionState        = 'error'
-                        ErrorMessage         = $chunkError
-                    })
-            }
-            continue
-        }
-
-        if ($null -eq $response) { continue }
-        $responseItems = if ($response -is [System.Collections.IDictionary]) { @($response['value']) } else { @($response.value) }
-        foreach ($responseItem in $responseItems) {
-            if ($null -eq $responseItem) { continue }
-            $getValue = {
-                param([object]$InputObject, [string]$PropertyName)
-                if ($InputObject -is [System.Collections.IDictionary]) { return $InputObject[$PropertyName] }
-                $property = $InputObject.PSObject.Properties[$PropertyName]
-                if ($property) { return $property.Value }
-                return $null
-            }
-            $serialNumber = & $getValue $responseItem 'serialNumber'
-            $deletionState = & $getValue $responseItem 'deletionState'
-            if (-not $serialNumber) {
-                Write-CleanupLog -Message 'Autopilot bulk removal returned an item without serialNumber; the item cannot authorize downstream Entra cleanup.' -Level WARNING -LogPath $LogPath
-            }
-            $normalizedStates.Add([PSCustomObject][ordered]@{
-                    SerialNumber         = $serialNumber
-                    DeviceRegistrationId = & $getValue $responseItem 'deviceRegistrationId'
-                    DeletionState        = $deletionState
-                    ErrorMessage         = & $getValue $responseItem 'errorMessage'
-                })
-        }
-    }
-    return $normalizedStates.ToArray()
-}
-
 function Invoke-ScrappedDeviceRemoval {
     <#
         .SYNOPSIS
@@ -1553,22 +1428,12 @@ function Invoke-ScrappedDeviceRemoval {
         }
     }
 
-    $autopilotSerials = @($matchedRecords | Where-Object AutopilotIdentityId | Select-Object -ExpandProperty InputSerialNumber -Unique)
-    $bulkStatesBySerial = @{}
-    $bulkSubmissionError = $null
-
-    if ($autopilotSerials.Count -gt 0) {
-        Write-CleanupLog -Message "Submitting $($autopilotSerials.Count) unique serial number(s) for bulk Autopilot removal." -Level INFO -LogPath $LogPath
-        try {
-            $bulkStates = @(Submit-WindowsAutopilotBulkRemoval -SerialNumbers $autopilotSerials -LogPath $LogPath -WhatIf:$WhatIfPreference -Confirm:$false)
-            foreach ($bulkState in $bulkStates) {
-                $normalizedSerial = ConvertTo-NormalizedSerialNumber -SerialNumber $bulkState.serialNumber
-                if ($normalizedSerial) { $bulkStatesBySerial[$normalizedSerial] = $bulkState }
-            }
-        } catch {
-            $bulkSubmissionError = $_.Exception.Message
-            Write-CleanupLog -Message "Autopilot bulk removal request failed: $bulkSubmissionError" -Level ERROR -LogPath $LogPath
-        }
+    $autopilotTargets = @($matchedRecords | Where-Object AutopilotIdentityId | ForEach-Object {
+            [PSCustomObject]@{ IdentityId = $_.AutopilotIdentityId; SerialNumber = $_.InputSerialNumber }
+        })
+    $identityStates = @{}
+    foreach ($identityState in @(Submit-WindowsAutopilotIdentityRemoval -Targets $autopilotTargets -LogPath $LogPath -WhatIf:$WhatIfPreference -Confirm:$false)) {
+        $identityStates[[string]$identityState.IdentityId] = $identityState
     }
 
     foreach ($record in $matchedRecords) {
@@ -1582,20 +1447,12 @@ function Invoke-ScrappedDeviceRemoval {
             continue
         }
 
-        $normalizedSerial = ConvertTo-NormalizedSerialNumber -SerialNumber $record.InputSerialNumber
-        $bulkState = if ($normalizedSerial -and $bulkStatesBySerial.ContainsKey($normalizedSerial)) { $bulkStatesBySerial[$normalizedSerial] } else { $null }
-        $deletionState = if ($bulkState -and $bulkState.deletionState) { $bulkState.deletionState.ToString().ToLowerInvariant() } else { 'missing' }
-        if ($deletionState -eq 'accepted') {
+        $identityState = if ($identityStates.ContainsKey([string]$record.AutopilotIdentityId)) { $identityStates[[string]$record.AutopilotIdentityId] } else { $null }
+        if ($identityState -and $identityState.Status -in 'RemovalSubmitted', 'AlreadyRemoved', 'WhatIf') {
             $record.AutopilotRemovalStatus = 'RemovalSubmitted'
         } else {
             $record.AutopilotRemovalStatus = 'RemovalFailed'
-            $record.ErrorMessage = if ($bulkSubmissionError) {
-                $bulkSubmissionError
-            } elseif ($bulkState -and $bulkState.errorMessage) {
-                $bulkState.errorMessage
-            } else {
-                "Autopilot bulk removal returned state '$deletionState'."
-            }
+            $record.ErrorMessage = if ($identityState -and $identityState.ErrorMessage) { $identityState.ErrorMessage } else { 'Autopilot identity removal was not submitted.' }
             if ($loggedAutopilotErrorSerials.Add([string]$record.NormalizedSerialNumber)) {
                 Write-CleanupLog -Message "Autopilot bulk removal was not accepted for serial '$($record.InputSerialNumber)': $($record.ErrorMessage)" -Level ERROR -LogPath $LogPath
             }
@@ -1707,18 +1564,14 @@ Export-ModuleMember -Function @(
     'Show-ScrappedDeviceSummary',
     'Request-DeletionConfirmation',
     'Export-ReportCsv',
-    'Get-DeviceLifecycleState',
-    'Save-DeviceLifecycleState',
     'Export-CleanupReports',
     'New-RunSummary',
     'Get-ScrappedDeviceSerialNumbers',
     'Resolve-ScrappedDeviceRecords',
-    'Disable-EntraDeviceRecord',
     'Remove-WindowsAutopilotRecord',
-    'Wait-WindowsAutopilotRemoval',
+    'Submit-WindowsAutopilotIdentityRemoval',
     'Remove-EntraDeviceRecord',
     'Remove-IntuneManagedDeviceRecord',
-    'Submit-WindowsAutopilotBulkRemoval',
     'Invoke-ScrappedDeviceRemoval',
     'Initialize-ProjectExecution',
     'Complete-ProjectExecution'

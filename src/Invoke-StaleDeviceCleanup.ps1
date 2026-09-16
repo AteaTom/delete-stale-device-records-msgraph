@@ -23,10 +23,6 @@
     and default value is 180. A timestamp exactly equal to the cutoff is
     treated as stale (inclusive comparison).
 
-    .PARAMETER DaysDisabled
-    Number of days an Entra device must remain disabled before it becomes
-    eligible for removal. The disable date is persisted under OutputPath.
-
     .PARAMETER Mode
     Audit (default, never deletes), Interactive (requires typing DELETE), or
     Automatic (requires -ConfirmDeletion, no prompt).
@@ -43,8 +39,7 @@
     Audit or Interactive mode.
 
     .PARAMETER IncludeDisabledDevices
-    Retained for compatibility. Disabled Entra objects are now always tracked
-    so that -DaysDisabled can determine when removal is allowed.
+    Retained for compatibility.
 
     .PARAMETER ProtectedDeviceIdFile
     Path to a CSV file containing EntraObjectId, EntraDeviceId, SerialNumber,
@@ -65,9 +60,9 @@
     matches a Windows Autopilot identity, Intune managed device, and/or Entra
     device object is submitted for removal from the applicable systems,
     independent of activity, disabled-state, or platform. Intune records are
-    removed first, then Autopilot serials are submitted through Microsoft's
-    bulk deleteDevices action. An accepted submission permits the related
-    Entra cleanup without waiting for Autopilot portal synchronization.
+    removed first, then the Autopilot identity is submitted through the
+    supported identity DELETE endpoint. A successful submission permits the
+    related Entra cleanup without waiting for Autopilot portal synchronization.
     Ambiguous (duplicate serial) or unmatched
     entries are reported but never acted on. Duplicate rows in the input file
     are ignored case-insensitively and counted in the pre-deletion summary.
@@ -103,9 +98,6 @@ param(
     [ValidateRange(180, [int]::MaxValue)]
     [int]$DaysInactive = 180,
 
-    [ValidateRange(1, [int]::MaxValue)]
-    [int]$DaysDisabled = 30,
-
     [ValidateSet('Audit', 'Interactive', 'Automatic')]
     [string]$Mode = 'Audit',
 
@@ -137,7 +129,7 @@ $loadedModule = Get-Module -Name 'StaleDeviceCleanup'
 $removeAutopilotCommand = Get-Command -Name 'Remove-WindowsAutopilotRecord' -ErrorAction SilentlyContinue
 $getScrappedSerialsCommand = Get-Command -Name 'Get-ScrappedDeviceSerialNumbers' -ErrorAction SilentlyContinue
 $showScrappedSummaryCommand = Get-Command -Name 'Show-ScrappedDeviceSummary' -ErrorAction SilentlyContinue
-$submitAutopilotBulkCommand = Get-Command -Name 'Submit-WindowsAutopilotBulkRemoval' -ErrorAction SilentlyContinue
+$submitAutopilotIdentityCommand = Get-Command -Name 'Submit-WindowsAutopilotIdentityRemoval' -ErrorAction SilentlyContinue
 $moduleIsCurrent = $loadedModule `
     -and $removeAutopilotCommand `
     -and $removeAutopilotCommand.Parameters.ContainsKey('SuppressErrorLog') `
@@ -145,7 +137,7 @@ $moduleIsCurrent = $loadedModule `
     -and $getScrappedSerialsCommand.Parameters.ContainsKey('Statistics') `
     -and $showScrappedSummaryCommand `
     -and $showScrappedSummaryCommand.Parameters.ContainsKey('CsvDuplicateCount') `
-    -and $submitAutopilotBulkCommand
+    -and $submitAutopilotIdentityCommand
 if (-not $moduleIsCurrent) {
     Import-Module -Name $modulePath -Force
 }
@@ -155,8 +147,6 @@ $runId = $runContext.RunId
 $resolvedOutputPath = $runContext.OutputPath
 $logPath = $runContext.LogPath
 $startTimeUtc = $runContext.StartTimeUtc
-$statePath = Join-Path -Path $OutputPath -ChildPath 'DeviceLifecycleState.json'
-
 $exitCode = 0
 $discoveryComplete = $true
 $confirmationGranted = $false
@@ -164,12 +154,9 @@ $allEvaluatedDevices = @()
 $scrappedDeviceRecords = @()
 $cutoffDateUtc = (Get-Date).ToUniversalTime().AddDays(-$DaysInactive)
 $permissionCheck = [PSCustomObject]@{ HasAllRequired = $false; MissingScopes = @(); GrantedScopes = @() }
-$deviceLifecycleState = @{}
 
 try {
     Write-CleanupLog -Message "Invoke-StaleDeviceCleanup starting. Version=$scriptVersion PSVersion=$($PSVersionTable.PSVersion) Mode=$Mode DaysInactive=$DaysInactive WhatIf=$([bool]$WhatIfPreference) RunId=$runId" -Level INFO -LogPath $logPath
-    $deviceLifecycleState = Get-DeviceLifecycleState -StatePath $statePath
-
     if ($Mode -eq 'Automatic' -and -not $ConfirmDeletion) {
         Write-CleanupLog -Message 'Automatic mode requires -ConfirmDeletion. Deletion will not be attempted; only discovery and reporting will run.' -Level WARNING -LogPath $logPath
     }
@@ -281,7 +268,7 @@ try {
 
         Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords $scrappedDeviceRecords -LogPath $logPath -WhatIf:$WhatIfPreference
 
-        $scrappedSubmittedAutopilot = @($scrappedDeviceRecords | Where-Object { $_.AutopilotRemovalStatus -eq 'RemovalSubmitted' -and $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId -Unique).Count
+        $scrappedSubmittedAutopilot = @($scrappedDeviceRecords | Where-Object { $_.AutopilotRemovalStatus -in 'RemovalSubmitted', 'AlreadyRemoved' -and $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId -Unique).Count
         $scrappedRemovedIntune = @($scrappedDeviceRecords | Where-Object { $_.IntuneRemovalStatus -eq 'Removed' -and $_.IntuneManagedDeviceId } | Select-Object -ExpandProperty IntuneManagedDeviceId -Unique).Count
         $scrappedRemovedEntra = @($scrappedDeviceRecords | Where-Object { $_.EntraRemovalStatus -eq 'Removed' -and $_.EntraObjectId } | Select-Object -ExpandProperty EntraObjectId -Unique).Count
         Write-CleanupLog -Message "Scrapped device removals completed: Autopilot submissions accepted=$scrappedSubmittedAutopilot; Intune removed=$scrappedRemovedIntune; Entra removed=$scrappedRemovedEntra." -Level INFO -LogPath $logPath
@@ -294,29 +281,16 @@ try {
         -RunId $runId -ProtectedEntraObjectIds $protectedEntraObjectIds -ProtectedEntraDeviceIds $protectedEntraDeviceIds `
         -ProtectedSerialNumbers $protectedSerialNumbers -ProtectedDeviceNames $protectedDeviceNames `
         -ProtectedNamePatterns $ProtectedDeviceNamePattern -IncludeDisabledDevices:$IncludeDisabledDevices `
-        -DeviceLifecycleState $deviceLifecycleState -DaysDisabled $DaysDisabled `
         -AllowOnPremisesSyncedDeletion:$AllowOnPremisesSyncedDeletion
 
-    $newlyTrackedDisabled = 0
-    foreach ($evaluatedDevice in $allEvaluatedDevices) {
-        if ($evaluatedDevice.EntraAccountEnabled -eq $false -and -not $deviceLifecycleState.ContainsKey([string]$evaluatedDevice.EntraObjectId)) {
-            $deviceLifecycleState[[string]$evaluatedDevice.EntraObjectId] = $startTimeUtc.ToString('o')
-            $evaluatedDevice.DisabledSinceUtc = $startTimeUtc
-            $evaluatedDevice.DaysDisabled = 0
-            $newlyTrackedDisabled++
-        }
-    }
-    Save-DeviceLifecycleState -State $deviceLifecycleState -StatePath $statePath
-    Write-CleanupLog -Message "Lifecycle state loaded from '$statePath'. Newly tracked disabled Entra object(s): $newlyTrackedDisabled." -Level INFO -LogPath $logPath
-    $plannedDisableCount = @($allEvaluatedDevices | Where-Object { $_.Decision -eq 'Candidate' -and $_.EntraAction -eq 'Disable' }).Count
     $plannedRemoveCount = @($allEvaluatedDevices | Where-Object { $_.Decision -eq 'Candidate' -and $_.EntraAction -eq 'Remove' }).Count
-    Write-CleanupLog -Message "Lifecycle actions planned: Entra object(s) to disable=$plannedDisableCount; Entra object(s) to remove=$plannedRemoveCount." -Level INFO -LogPath $logPath
+    Write-CleanupLog -Message "Lifecycle actions planned: Entra object(s) to remove=$plannedRemoveCount." -Level INFO -LogPath $logPath
 
     # Reports must exist before any confirmation prompt, in every mode.
     Export-CleanupReports -AllEvaluatedDevices $allEvaluatedDevices -OutputPath $resolvedOutputPath
     Export-ReportCsv -InputObject $scrappedDeviceRecords -Path (Join-Path $resolvedOutputPath 'ScrappedDeviceResults.csv')
 
-    Show-CleanupSummary -EvaluatedDevices $allEvaluatedDevices -CutoffDateUtc $cutoffDateUtc -DaysInactive $DaysInactive -DaysDisabled $DaysDisabled -OutputPath $resolvedOutputPath
+    Show-CleanupSummary -EvaluatedDevices $allEvaluatedDevices -CutoffDateUtc $cutoffDateUtc -DaysInactive $DaysInactive -OutputPath $resolvedOutputPath
 
     $shouldAttemptDeletion = $false
     switch ($Mode) {
@@ -357,47 +331,22 @@ try {
         $autopilotCandidates = @($candidates | Where-Object {
                 $_.Platform -eq 'Windows' -and $_.AutopilotPresent -and $_.MatchConfidence -eq 'High'
             })
-        $autopilotSerials = @($autopilotCandidates | Where-Object AutopilotSerialNumber | Select-Object -ExpandProperty AutopilotSerialNumber -Unique)
-        $bulkStatesBySerial = @{}
-        $bulkSubmissionError = $null
-
-        if ($autopilotSerials.Count -gt 0) {
-            Write-CleanupLog -Message "Submitting $($autopilotSerials.Count) unique stale-device serial number(s) for bulk Autopilot removal." -Level INFO -LogPath $logPath
-            try {
-                $bulkStates = @(Submit-WindowsAutopilotBulkRemoval -SerialNumbers $autopilotSerials -LogPath $logPath -WhatIf:$WhatIfPreference -Confirm:$false)
-                foreach ($bulkState in $bulkStates) {
-                    $normalizedSerial = ConvertTo-NormalizedSerialNumber -SerialNumber $bulkState.serialNumber
-                    if ($normalizedSerial) { $bulkStatesBySerial[$normalizedSerial] = $bulkState }
-                }
-            } catch {
-                $bulkSubmissionError = $_.Exception.Message
-                Write-CleanupLog -Message "Stale-device Autopilot bulk removal request failed: $bulkSubmissionError" -Level ERROR -LogPath $logPath
-            }
+        $autopilotTargets = @($autopilotCandidates | ForEach-Object {
+                [PSCustomObject]@{ IdentityId = $_.AutopilotIdentityId; SerialNumber = $_.AutopilotSerialNumber }
+            })
+        $identityStates = @{}
+        foreach ($identityState in @(Submit-WindowsAutopilotIdentityRemoval -Targets $autopilotTargets -LogPath $logPath -WhatIf:$WhatIfPreference -Confirm:$false)) {
+            $identityStates[[string]$identityState.IdentityId] = $identityState
         }
 
         foreach ($candidate in $autopilotCandidates) {
-            if ($WhatIfPreference) {
-                $candidate.AutopilotRemovalStatus = 'WhatIf'
-                continue
-            }
-
-            $normalizedSerial = ConvertTo-NormalizedSerialNumber -SerialNumber $candidate.AutopilotSerialNumber
-            $bulkState = if ($normalizedSerial -and $bulkStatesBySerial.ContainsKey($normalizedSerial)) { $bulkStatesBySerial[$normalizedSerial] } else { $null }
-            $deletionState = if ($bulkState -and $bulkState.deletionState) { $bulkState.deletionState.ToString().ToLowerInvariant() } else { 'missing' }
-            if ($deletionState -eq 'accepted') {
-                $candidate.AutopilotRemovalStatus = 'RemovalSubmitted'
+            $identityState = if ($identityStates.ContainsKey([string]$candidate.AutopilotIdentityId)) { $identityStates[[string]$candidate.AutopilotIdentityId] } else { $null }
+            if ($identityState -and $identityState.Status -in 'RemovalSubmitted', 'AlreadyRemoved', 'WhatIf') {
+                $candidate.AutopilotRemovalStatus = $identityState.Status
             } else {
                 $candidate.AutopilotRemovalStatus = 'RemovalFailed'
-                $candidate.ErrorMessage = if ($bulkSubmissionError) {
-                    $bulkSubmissionError
-                } elseif (-not $normalizedSerial) {
-                    'The matched Autopilot identity has no usable serial number for bulk removal.'
-                } elseif ($bulkState -and $bulkState.errorMessage) {
-                    $bulkState.errorMessage
-                } else {
-                    "Autopilot bulk removal returned state '$deletionState'."
-                }
-                Write-CleanupLog -Message "Stale-device Autopilot bulk removal was not accepted for serial '$($candidate.AutopilotSerialNumber)' and Entra object '$($candidate.EntraObjectId)': $($candidate.ErrorMessage)" -Level ERROR -LogPath $logPath
+                $candidate.ErrorMessage = if ($identityState -and $identityState.ErrorMessage) { $identityState.ErrorMessage } else { 'Autopilot identity removal was not submitted.' }
+                Write-CleanupLog -Message "Stale-device Autopilot identity removal was not accepted for identity '$($candidate.AutopilotIdentityId)' and Entra object '$($candidate.EntraObjectId)': $($candidate.ErrorMessage)" -Level ERROR -LogPath $logPath
                 $deletionErrors++
             }
         }
@@ -409,30 +358,12 @@ try {
                 }
 
                 $autopilotAccepted = -not $candidate.AutopilotPresent -or $candidate.AutopilotRemovalStatus -in 'RemovalSubmitted', 'WhatIf'
-                if ($autopilotAccepted -and $candidate.EntraAction -eq 'Disable') {
-                    $entraDisabled = Disable-EntraDeviceRecord -EntraObjectId $candidate.EntraObjectId -LogPath $logPath -WhatIf:$WhatIfPreference -Confirm:$false
-                    if ($WhatIfPreference) {
-                        $candidate.EntraDisableStatus = 'WhatIf'
-                    } elseif ($entraDisabled) {
-                        $candidate.EntraDisableStatus = 'Disabled'
-                        $candidate.EntraRemovalStatus = 'NotYetEligible'
-                        $deviceLifecycleState[[string]$candidate.EntraObjectId] = (Get-Date).ToUniversalTime().ToString('o')
-                        $candidate.DisabledSinceUtc = Get-SafeUtcTimestamp -Value $deviceLifecycleState[[string]$candidate.EntraObjectId]
-                        $candidate.DaysDisabled = 0
-                        Write-CleanupLog -Message "Disabled Entra device object '$($candidate.EntraObjectId)' ('$($candidate.DeviceName)')." -Level SUCCESS -LogPath $logPath
-                    } else {
-                        $candidate.EntraDisableStatus = 'Skipped'
-                    }
-                } elseif ($candidate.AutopilotPresent -and $candidate.AutopilotRemovalStatus -in 'RemovalSubmitted', 'WhatIf' -and $candidate.EntraAction -eq 'Remove') {
-                    $candidate.EntraRemovalStatus = 'PendingAutopilotRemoval'
-                    Write-CleanupLog -Message "Autopilot removal was accepted for '$($candidate.AutopilotIdentityId)'; permanent Entra removal for '$($candidate.EntraObjectId)' is deferred until a later discovery confirms the Autopilot record is absent." -Level INFO -LogPath $logPath
-                } elseif ($autopilotAccepted -and $candidate.EntraAction -eq 'Remove') {
+                if ($autopilotAccepted -and $candidate.EntraAction -eq 'Remove') {
                     $entraRemoved = Remove-EntraDeviceRecord -EntraObjectId $candidate.EntraObjectId -LogPath $logPath -WhatIf:$WhatIfPreference -Confirm:$false
                     if ($WhatIfPreference) {
                         $candidate.EntraRemovalStatus = 'WhatIf'
                     } elseif ($entraRemoved) {
                         $candidate.EntraRemovalStatus = 'Removed'
-                        $deviceLifecycleState.Remove([string]$candidate.EntraObjectId)
                         Write-CleanupLog -Message "Removed Entra device object '$($candidate.EntraObjectId)' ('$($candidate.DeviceName)')." -Level SUCCESS -LogPath $logPath
                     } else {
                         $candidate.EntraRemovalStatus = 'Skipped'
@@ -448,11 +379,9 @@ try {
         }
 
         # Re-write reports so DeletedDevices.csv and status columns reflect the outcome.
-        Save-DeviceLifecycleState -State $deviceLifecycleState -StatePath $statePath
-        $disabledCount = @($allEvaluatedDevices | Where-Object EntraDisableStatus -eq 'Disabled').Count
         $removedCount = @($allEvaluatedDevices | Where-Object EntraRemovalStatus -eq 'Removed').Count
-        $autopilotSubmittedCount = @($allEvaluatedDevices | Where-Object AutopilotRemovalStatus -eq 'RemovalSubmitted').Count
-        Write-CleanupLog -Message "Lifecycle actions completed: Autopilot removal submission(s) accepted=$autopilotSubmittedCount; Entra object(s) disabled=$disabledCount; Entra object(s) removed=$removedCount." -Level INFO -LogPath $logPath
+                $autopilotSubmittedCount = @($allEvaluatedDevices | Where-Object AutopilotRemovalStatus -in 'RemovalSubmitted', 'AlreadyRemoved').Count
+        Write-CleanupLog -Message "Lifecycle actions completed: Autopilot removal submission(s) accepted=$autopilotSubmittedCount; Entra object(s) disabled=0; Entra object(s) removed=$removedCount." -Level INFO -LogPath $logPath
         Export-CleanupReports -AllEvaluatedDevices $allEvaluatedDevices -OutputPath $resolvedOutputPath
 
         if ($deletionErrors -gt 0 -and $exitCode -eq 0) { $exitCode = 6 }
@@ -466,7 +395,7 @@ try {
     if ($exitCode -eq 0) { $exitCode = 3 }
 } finally {
     $runSummary = New-RunSummary -RunId $runId -Mode $Mode -StartTimeUtc $startTimeUtc -CutoffDateUtc $cutoffDateUtc `
-        -DaysInactive $DaysInactive -DaysDisabled $DaysDisabled -AllEvaluatedDevices $allEvaluatedDevices -WhatIfMode ([bool]$WhatIfPreference) `
+        -DaysInactive $DaysInactive -AllEvaluatedDevices $allEvaluatedDevices -WhatIfMode ([bool]$WhatIfPreference) `
         -ScrappedDeviceRecords $scrappedDeviceRecords -ConfirmationGranted $confirmationGranted -DiscoveryComplete $discoveryComplete -ExitCode $exitCode
 
     Complete-ProjectExecution -RunSummary $runSummary -OutputPath $resolvedOutputPath -LogPath $logPath

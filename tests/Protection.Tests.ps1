@@ -66,16 +66,11 @@ Describe 'Get-StaleDeviceCandidates protection integration' {
         $result[0].Decision | Should -Be 'Candidate'
     }
 
-    It 'tracks newly observed disabled devices before allowing removal' {
+    It 'removes stale disabled devices directly' {
         $device = New-TestEntraDevice -Id 'p4' -DeviceId 'dp4' -DisplayName 'W' -AccountEnabled $false -ApproximateLastSignInDateTime (Get-Date).ToUniversalTime().AddDays(-300)
         $default = Get-StaleDeviceCandidates -EntraDevices @($device) -Indexes $indexes -CutoffDateUtc $cutoff -RunId 'r1'
-        $default[0].Decision | Should -Be 'Excluded'
-        $default[0].ReasonCode | Should -Be 'DisabledTracking'
-
-        $state = @{ p4 = (Get-Date).ToUniversalTime().AddDays(-31).ToString('o') }
-        $eligible = Get-StaleDeviceCandidates -EntraDevices @($device) -Indexes $indexes -CutoffDateUtc $cutoff -RunId 'r1' -DeviceLifecycleState $state -DaysDisabled 30
-        $eligible[0].Decision | Should -Be 'Candidate'
-        $eligible[0].ReasonCode | Should -Be 'DisabledForThreshold'
-        $eligible[0].EntraAction | Should -Be 'Remove'
+        $default[0].Decision | Should -Be 'Candidate'
+        $default[0].ReasonCode | Should -Be 'Stale'
+        $default[0].EntraAction | Should -Be 'Remove'
     }
 }

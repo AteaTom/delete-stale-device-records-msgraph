@@ -1,8 +1,8 @@
 # Reporting
 
 Every execution creates a timestamped folder: `output\<yyyyMMdd-HHmmss>\`.
-The lifecycle ledger is stored at the output root as
-`DeviceLifecycleState.json` so it survives across timestamped runs.
+Legacy lifecycle files may exist at the output root but are not used as a
+deletion gate.
 
 All CSV files use UTF-8 encoding and are written even when empty (guaranteed
 by `Export-ReportCsv`). Every row includes the run's `RunId`.
@@ -27,22 +27,19 @@ the field list documented in the project specification, including
 `EffectiveLastActivityUtc`, `ActivitySource`, `MatchConfidence`,
 `ReasonCode`, `ReasonDescription`, `EntraAction`, `EntraDisableStatus`,
 `AutopilotRemovalStatus`, and `EntraRemovalStatus`. Timestamps are ISO 8601
-UTC. `DisabledSinceUtc` and `DaysDisabled` describe the persisted lifecycle
-age used for removal eligibility.
+UTC. Legacy lifecycle columns may remain in historical reports; they are no
+longer used as a removal gate.
 
 Lifecycle Autopilot statuses include `RemovalSubmitted`, `RemovalFailed`,
-`WhatIf`, `NotApplicable`, and `NotAttempted`. `RemovalSubmitted` means Graph
-accepted asynchronous processing; it does not mean the record has already
-disappeared. `PendingAutopilotRemoval` on the Entra status means permanent
-deletion is deferred until a later discovery confirms Autopilot absence.
+`WhatIf`, `NotApplicable`, and `NotAttempted`. `RemovalSubmitted` means the supported Autopilot identity DELETE succeeded;
+it does not mean the record has already disappeared. Entra removal is only
+attempted after a successful or already-completed Autopilot DELETE.
 
-Entra lifecycle statuses include `Disabled`, `NotYetEligible`, `WhatIf`,
-`Skipped`, and `NotAttempted`. `RunSummary.json` includes planned and completed
-counts for both disabling and removal, and `ExecutionLog.txt` records the same
-counts at planning and completion. `RunSummary.json` also includes
+Entra lifecycle statuses include `Removed`, `WhatIf`, `Skipped`, and
+`NotAttempted`. `RunSummary.json` includes planned and completed removal
+counts, and `ExecutionLog.txt` records the same counts at planning and
+completion. `RunSummary.json` also includes
 `TotalAutopilotRemovalSubmitted` separately from `TotalAutopilotRemoved`.
-An accepted-but-pending `RemovalSubmitted` row is not included in
-`DeletedDevices.csv` solely because of that status.
 
 ## Scrapped-device columns
 
@@ -57,7 +54,7 @@ Related object states include `Removed`, `RemovalFailed`,
 `SkippedAutopilotSubmissionFailed`, `DuplicateSkipped`, `WhatIf`, `Skipped`,
 `NotApplicable`, and `NotAttempted`.
 
-`RemovalSubmitted` means the Microsoft Graph bulk action returned `accepted`.
+`RemovalSubmitted` means the supported Autopilot identity DELETE succeeded.
 It confirms submission, not immediate disappearance from the Autopilot portal;
 the service completes that work asynchronously.
 
@@ -87,7 +84,7 @@ reviewed before confirmation.
 `MissingAllActivity`, `UnsupportedPlatform`, `MissingOperatingSystem`,
 `AmbiguousAutopilotMatch`, `DuplicateSerialNumber`, `LowConfidenceMatch`,
 `ProtectedDevice`, `RecentActivityDetected`, `DisabledTracking`,
-`DisabledForThreshold`, `Stale`.
+`Stale`.
 
 (`IncompleteGraphData`, `ConflictingIdentifiers`, and `GraphReadError` are
 reserved reason codes for future per-device error handling refinements.)
