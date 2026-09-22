@@ -72,6 +72,14 @@ is no longer a 30-day deletion gate.
 values are available in `RunSummary.json` as
 `TotalEntraDevicesToRemove` and `TotalEntraDevicesRemoved`.
 
+## Entra deletion reports Request_ResourceNotFound
+
+An Entra device can disappear between discovery and deletion because another
+administrator or an earlier cleanup run already removed it. Current versions
+treat Graph `404 Request_ResourceNotFound` from `Remove-MgDevice` as successful
+idempotent completion because the requested end state has already been reached.
+Other Graph errors, including permission failures, still fail the operation.
+
 ## A scrapped-device serial number shows as Ambiguous or NotFound
 
 Check `ScrappedDeviceResults.csv`. `Ambiguous` means the serial number matched

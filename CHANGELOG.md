@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [1.0.1] - 2026-09-22
 
 ### Added
 
@@ -19,6 +19,11 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Treat Microsoft Graph `404 Request_ResourceNotFound` responses from Entra
+  device deletion as successful idempotent completion when the object was
+  removed after discovery or by an earlier operation. Other Graph failures
+  continue to fail the run. Version the module as `1.0.1` and reload older
+  in-memory module versions so this behavior takes effect in existing shells.
 - Replace production use of the unsupported Autopilot `deleteDevices` action
   with individual Windows Autopilot identity DELETE requests. The bulk helper
   remains only for isolated diagnostics/tests; stale and scrapped workflows no

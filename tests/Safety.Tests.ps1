@@ -35,6 +35,8 @@ Describe 'Parameter validation' {
     It 'reloads an older module when scrapped-device parameters are missing' {
         $scriptContent = Get-Content -LiteralPath $script:scriptPath -Raw
 
+        $scriptContent | Should -Match "requiredModuleVersion = \[version\]'1\.0\.1'"
+        $scriptContent | Should -Match 'loadedModule\.Version -eq \$requiredModuleVersion'
         $scriptContent | Should -Match "Get-ScrappedDeviceSerialNumbers'.*ErrorAction SilentlyContinue"
         $scriptContent | Should -Match "getScrappedSerialsCommand\.Parameters\.ContainsKey\('Statistics'\)"
         $scriptContent | Should -Match "showScrappedSummaryCommand\.Parameters\.ContainsKey\('CsvDuplicateCount'\)"

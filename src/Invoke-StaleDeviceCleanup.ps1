@@ -121,7 +121,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.0.0'
+$scriptVersion = '1.0.1'
+$requiredModuleVersion = [version]'1.0.1'
 $modulePath = Join-Path -Path $PSScriptRoot -ChildPath 'StaleDeviceCleanup.psd1'
 # Avoid -Force when the module is already loaded (e.g. under Pester with mocks
 # injected into the existing module scope) so mocked commands are preserved.
@@ -131,6 +132,7 @@ $getScrappedSerialsCommand = Get-Command -Name 'Get-ScrappedDeviceSerialNumbers'
 $showScrappedSummaryCommand = Get-Command -Name 'Show-ScrappedDeviceSummary' -ErrorAction SilentlyContinue
 $submitAutopilotIdentityCommand = Get-Command -Name 'Submit-WindowsAutopilotIdentityRemoval' -ErrorAction SilentlyContinue
 $moduleIsCurrent = $loadedModule `
+    -and $loadedModule.Version -eq $requiredModuleVersion `
     -and $removeAutopilotCommand `
     -and $removeAutopilotCommand.Parameters.ContainsKey('SuppressErrorLog') `
     -and $getScrappedSerialsCommand `

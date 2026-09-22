@@ -1348,9 +1348,25 @@ function Remove-EntraDeviceRecord {
     )
 
     if ($PSCmdlet.ShouldProcess($EntraObjectId, 'Remove Microsoft Entra ID device object')) {
-        Invoke-GraphWithRetry -OperationName 'Remove-MgDevice' -LogPath $LogPath -ScriptBlock {
-            # Note: Remove-MgDevice's -DeviceId parameter expects the Entra directory object id, not device.deviceId.
-            Remove-MgDevice -DeviceId $EntraObjectId -ErrorAction Stop
+        try {
+            Invoke-GraphWithRetry -OperationName 'Remove-MgDevice' -LogPath $LogPath -SuppressErrorLog -ScriptBlock {
+                # Note: Remove-MgDevice's -DeviceId parameter expects the Entra directory object id, not device.deviceId.
+                Remove-MgDevice -DeviceId $EntraObjectId -ErrorAction Stop
+            }
+        } catch {
+            $statusCode = if ($_.Exception.PSObject.Properties.Name -contains 'ResponseStatusCode') { $_.Exception.ResponseStatusCode } else { $null }
+            $errorMessage = Get-GraphErrorMessage -ErrorRecord $_
+            if ($statusCode -eq 404 -or $errorMessage -match 'Request_ResourceNotFound') {
+                if ($LogPath) {
+                    Write-CleanupLog -Message "Entra device object '$EntraObjectId' was already absent; treating removal as complete." -Level INFO -LogPath $LogPath
+                }
+                return $true
+            }
+
+            if ($LogPath) {
+                Write-CleanupLog -Message "Graph operation 'Remove-MgDevice' failed: $errorMessage" -Level ERROR -LogPath $LogPath
+            }
+            throw
         }
         return $true
     }
