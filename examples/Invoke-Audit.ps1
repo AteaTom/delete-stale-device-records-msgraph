@@ -3,9 +3,9 @@
     .SYNOPSIS
     Safe, non-destructive audit run. Always start here.
 #>
-Set-Location -LiteralPath (Split-Path -Parent $PSScriptRoot)
+$scriptPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'src/Invoke-StaleDeviceCleanup.ps1'
 
-& '.\src\Invoke-StaleDeviceCleanup.ps1' `
+& $scriptPath `
     -Mode Audit `
     -DaysInactive 180 `
     -DaysDisabled 30 `

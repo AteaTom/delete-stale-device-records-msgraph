@@ -5,9 +5,9 @@
     -WhatIf is removed, will perform REAL deletions once -ConfirmDeletion is
     supplied. Review all reports from an Audit run before ever enabling this.
 #>
-Set-Location -LiteralPath (Split-Path -Parent $PSScriptRoot)
+$scriptPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'src/Invoke-StaleDeviceCleanup.ps1'
 
-& '.\src\Invoke-StaleDeviceCleanup.ps1' `
+& $scriptPath `
     -Mode Automatic `
     -DaysInactive 365 `
     -DaysDisabled 30 `

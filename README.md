@@ -119,15 +119,12 @@ licensing requirements.
 Clone or copy this repository, then run the module import check:
 
 ```powershell
-Set-Location -LiteralPath 'C:\Users\Tom Eriksson\source\repos\delete-stale-device-records-msgraph'
 Import-Module .\src\StaleDeviceCleanup.psd1 -Force
 ```
 
 ## First safe run (Audit)
 
 ```powershell
-Set-Location -LiteralPath 'C:\Users\Tom Eriksson\source\repos\delete-stale-device-records-msgraph'
-
 .\src\Invoke-StaleDeviceCleanup.ps1 `
     -Mode Audit `
     -DaysInactive 180 `

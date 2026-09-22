@@ -26,7 +26,6 @@ jobs:
       - name: Run PSScriptAnalyzer
         shell: pwsh
         run: |
-          Set-Location ./delete-stale-device-records-msgraph
           Import-Module PSScriptAnalyzer
           $results = Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1
           $results | Format-Table -AutoSize
@@ -39,7 +38,6 @@ jobs:
       - name: Run Pester tests
         shell: pwsh
         run: |
-          Set-Location ./delete-stale-device-records-msgraph
           Import-Module Pester -RequiredVersion 5.5.0
           $config = New-PesterConfiguration
           $config.Run.Path = './tests'
