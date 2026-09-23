@@ -162,7 +162,7 @@ Each run creates `output\<yyyyMMdd-HHmmss>\` containing
 
 For hardware that has been physically scrapped, maintain a recurring
 CSV/text file with one serial number per line (an optional header row is
-skipped automatically), for example `src/SkrotadeDatorer.csv`, and pass it
+skipped automatically), for example `src/ScrappedDevice.csv`, and pass it
 via `-ScrappedDeviceCsvPath`. This workflow is entirely independent of
 `-DaysInactive` and the stale-device evaluation: when the
 parameter is supplied, the script takes the scrapped-device branch first and
@@ -172,7 +172,7 @@ otherwise be excluded as "recent activity detected":
 
 ```powershell
 .\src\Invoke-StaleDeviceCleanup.ps1 -Mode Interactive `
-  -ScrappedDeviceCsvPath '.\src\SkrotadeDatorer.csv'
+  -ScrappedDeviceCsvPath '.\src\ScrappedDevice.csv'
 ```
 
 Repeated CSV rows are removed case-insensitively before correlation, preserving
