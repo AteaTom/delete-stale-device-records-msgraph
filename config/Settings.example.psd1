@@ -5,7 +5,6 @@
     # task wrapper script if desired (see examples/Invoke-Automatic.ps1).
 
     DaysInactive               = 180
-    DaysDisabled               = 30
     Mode                       = 'Audit'
     OutputPath                 = '.\output'
     TenantId                   = ''
