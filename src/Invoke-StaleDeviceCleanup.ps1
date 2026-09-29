@@ -43,7 +43,9 @@
 
     .PARAMETER ProtectedDeviceIdFile
     Path to a CSV file containing EntraObjectId, EntraDeviceId, SerialNumber,
-    and/or DeviceName columns. Matching devices are always excluded.
+    and/or DeviceName columns. Matching devices are always excluded. DeviceName
+    values support the same wildcard syntax as -ProtectedDeviceNamePattern
+    (e.g. 'PAW*'), as well as literal names.
 
     .PARAMETER ProtectedDeviceNamePattern
     One or more wildcard patterns (e.g. 'PAW-*') for device names that must
@@ -121,8 +123,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.0.1'
-$requiredModuleVersion = [version]'1.0.1'
+$scriptVersion = '1.0.2'
+$requiredModuleVersion = [version]'1.0.2'
 $modulePath = Join-Path -Path $PSScriptRoot -ChildPath 'StaleDeviceCleanup.psd1'
 # Avoid -Force when the module is already loaded (e.g. under Pester with mocks
 # injected into the existing module scope) so mocked commands are preserved.

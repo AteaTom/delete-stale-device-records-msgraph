@@ -38,6 +38,12 @@ Describe 'Test-DeviceProtection' {
         $result = Test-DeviceProtection -Device $device -ProtectedNamePatterns @('BREAKGLASS-*') -ProtectedEntraObjectIds @('obj-1')
         $result.IsProtected | Should -Be $false
     }
+
+    It 'protects a device whose name matches a wildcard pattern loaded from the ProtectedDeviceIdFile DeviceName column' {
+        $device = [PSCustomObject]@{ Id = 'obj-5'; DeviceId = 'dev-5'; DisplayName = 'PAW-CEO-LAPTOP' }
+        $result = Test-DeviceProtection -Device $device -ProtectedDeviceNames @('PAW*')
+        $result.IsProtected | Should -Be $true
+    }
 }
 
 Describe 'Get-StaleDeviceCandidates protection integration' {

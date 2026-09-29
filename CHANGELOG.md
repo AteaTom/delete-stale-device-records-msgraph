@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.2] - 2026-09-29
+
+### Fixed
+
+- `-ProtectedDeviceIdFile`'s `DeviceName` column now supports wildcard patterns
+  (e.g. `PAW*`), matching the behavior of `-ProtectedDeviceNamePattern`.
+  Previously it only matched exact, literal device names.
+
 ## [1.0.1] - 2026-09-22
 
 ### Added

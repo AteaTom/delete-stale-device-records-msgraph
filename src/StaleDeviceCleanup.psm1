@@ -624,8 +624,11 @@ function Test-DeviceProtection {
         }
     }
     if ($Device.DisplayName) {
-        if ($ProtectedDeviceNames -contains $Device.DisplayName) {
-            return [PSCustomObject]@{ IsProtected = $true; Reason = 'Device name matches the protected device list.' }
+        # -like also matches plain names with no wildcard chars, so CSV DeviceName entries may contain literal names or wildcard patterns.
+        foreach ($name in $ProtectedDeviceNames) {
+            if ($Device.DisplayName -like $name) {
+                return [PSCustomObject]@{ IsProtected = $true; Reason = 'Device name matches the protected device list.' }
+            }
         }
         foreach ($pattern in $ProtectedNamePatterns) {
             if ($Device.DisplayName -like $pattern) {
