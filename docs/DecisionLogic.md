@@ -120,7 +120,7 @@ After confirmation, the scrapped-device operation follows this order:
 6. Windows device with a non-High-confidence Autopilot match → **ManualReview** (`LowConfidenceMatch`)
 7. No authoritative activity timestamp at all → **ManualReview** (`MissingAllActivity`)
 8. Effective last activity newer than cutoff → **Excluded** (`RecentActivityDetected`)
-9. On-premises synchronized, override not set → **Excluded** (`ProtectedDevice`)
+9. On-premises synchronized, override not set → **Excluded** (`OnPremisesSyncProtected`); the source AD object's deletion safety is not assessed.
 10. Otherwise → **Candidate** (`Stale`, action `Remove`)
 
 ## Lifecycle order
