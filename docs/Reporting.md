@@ -4,6 +4,15 @@ Every execution creates a timestamped folder: `output\<yyyyMMdd-HHmmss>\`.
 Legacy lifecycle files may exist at the output root but are not used as a
 deletion gate.
 
+## Sensitive data
+
+Reports and logs can contain sensitive operational data, including device
+names, serial numbers, Entra/Intune/Autopilot identifiers, and the connected
+tenant ID. Audit runs write these files too. Store generated output in
+access-controlled locations and never commit reports or logs. Repository
+ignore rules apply only to matching paths in this checkout: they do not erase
+Git history or protect files written to arbitrary external output locations.
+
 All CSV files use UTF-8 encoding and are written even when empty (guaranteed
 by `Export-ReportCsv`). Every row includes the run's `RunId`.
 

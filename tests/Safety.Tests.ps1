@@ -289,7 +289,7 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
 
     It 'executes the scrapped-device branch and exits before running the stale lifecycle flow when the CSV path is supplied' {
         $scrappedPath = Join-Path ([System.IO.Path]::GetTempPath()) "scrapped-branch-$(New-Guid).csv"
-        Set-Content -LiteralPath $scrappedPath -Value @('5CD3271HSD')
+        Set-Content -LiteralPath $scrappedPath -Value @('TESTSN0001')
 
         Mock -CommandName Get-MgContext -ModuleName StaleDeviceCleanup -MockWith {
             [PSCustomObject]@{
@@ -309,10 +309,10 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
             @((New-TestEntraDevice -Id 'obj1' -DeviceId 'dev1' -DisplayName 'STALE-WIN01' -ApproximateLastSignInDateTime (Get-Date).ToUniversalTime().AddDays(-300)))
         }
         Mock -CommandName Get-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -MockWith {
-            @([PSCustomObject]@{ Id = 'ap1'; AzureActiveDirectoryDeviceId = 'dev1'; ManagedDeviceId = 'intune1'; SerialNumber = '5CD3271HSD'; EnrollmentState = 'enrolled' })
+            @([PSCustomObject]@{ Id = 'ap1'; AzureActiveDirectoryDeviceId = 'dev1'; ManagedDeviceId = 'intune1'; SerialNumber = 'TESTSN0001'; EnrollmentState = 'enrolled' })
         }
         Mock -CommandName Get-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -MockWith {
-            @([PSCustomObject]@{ Id = 'intune1'; AzureAdDeviceId = 'dev1'; SerialNumber = '5CD3271HSD'; DeviceName = 'STALE-WIN01' })
+            @([PSCustomObject]@{ Id = 'intune1'; AzureAdDeviceId = 'dev1'; SerialNumber = 'TESTSN0001'; DeviceName = 'STALE-WIN01' })
         }
         Mock -CommandName Update-MgDevice -ModuleName StaleDeviceCleanup -MockWith { }
         Mock -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -MockWith { }
@@ -339,7 +339,7 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
 
     It 'shows the scrapped-device summary before interactive deletion confirmation' {
         $scrappedPath = Join-Path ([System.IO.Path]::GetTempPath()) "scrapped-summary-$(New-Guid).csv"
-        Set-Content -LiteralPath $scrappedPath -Value @('5CD3271HSD', '5cd3271hsd')
+        Set-Content -LiteralPath $scrappedPath -Value @('TESTSN0001', 'testsn0001')
         $global:scrappedSummaryShown = $false
 
         Mock -CommandName Get-MgContext -ModuleName StaleDeviceCleanup -MockWith {
@@ -357,7 +357,7 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
             }
         }
         Mock -CommandName Get-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -MockWith {
-            @([PSCustomObject]@{ Id = 'ap1'; AzureActiveDirectoryDeviceId = 'dev1'; ManagedDeviceId = $null; SerialNumber = '5CD3271HSD'; EnrollmentState = 'enrolled' })
+            @([PSCustomObject]@{ Id = 'ap1'; AzureActiveDirectoryDeviceId = 'dev1'; ManagedDeviceId = $null; SerialNumber = 'TESTSN0001'; EnrollmentState = 'enrolled' })
         }
         Mock -CommandName Write-Host -ModuleName StaleDeviceCleanup -ParameterFilter { $Object -eq 'Scrapped-device cleanup summary' } -MockWith {
             $global:scrappedSummaryShown = $true

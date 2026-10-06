@@ -158,6 +158,13 @@ Each run creates `output\<yyyyMMdd-HHmmss>\` containing
 `AllEvaluatedDevices.csv`, `ScrappedDeviceResults.csv`, `RunSummary.json`, and
 `ExecutionLog.txt`. See [docs/Reporting.md](docs/Reporting.md).
 
+Reports and logs can contain sensitive operational data, including device
+names, serial numbers, Entra/Intune/Autopilot identifiers, and the connected
+tenant ID. This applies to Audit runs as well as destructive modes. Store the
+output in access-controlled locations and never commit generated reports or
+logs. `.gitignore` only covers matching paths in this repository; it does not
+erase Git history or protect output written to arbitrary external locations.
+
 ## Scrapped devices (explicit serial-number removal)
 
 For hardware that has been physically scrapped, maintain a recurring

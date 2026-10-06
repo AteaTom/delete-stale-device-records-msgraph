@@ -22,18 +22,18 @@ Describe 'Get-ScrappedDeviceSerialNumbers' {
     }
 
     It 'trims whitespace, skips blank lines, and de-duplicates case-insensitively' {
-        Set-Content -LiteralPath $script:csvPath -Value @('  5CD3271HSD  ', '', '5cd3271hsd', '5CD8245V12')
+        Set-Content -LiteralPath $script:csvPath -Value @('  TESTSN0001  ', '', 'testsn0001', 'TESTSN0002')
         $statistics = $null
         $result = Get-ScrappedDeviceSerialNumbers -Path $script:csvPath -Statistics ([ref]$statistics)
-        $result | Should -Be @('5CD3271HSD', '5CD8245V12')
+        $result | Should -Be @('TESTSN0001', 'TESTSN0002')
         $statistics.UniqueSerialCount | Should -Be 2
         $statistics.DuplicateRowCount | Should -Be 1
     }
 
     It 'skips an optional header row' {
-        Set-Content -LiteralPath $script:csvPath -Value @('SerialNumber', '5CD3271HSD')
+        Set-Content -LiteralPath $script:csvPath -Value @('SerialNumber', 'TESTSN0001')
         $result = Get-ScrappedDeviceSerialNumbers -Path $script:csvPath
-        $result | Should -Be @('5CD3271HSD')
+        $result | Should -Be @('TESTSN0001')
     }
 
     It 'throws when the file does not exist' {
@@ -43,12 +43,12 @@ Describe 'Get-ScrappedDeviceSerialNumbers' {
 Describe 'Resolve-ScrappedDeviceRecords' {
     BeforeAll {
         $script:entraDevice = New-TestEntraDevice -Id 'entra1' -DeviceId 'aad-device-1' -DisplayName 'SCRAPPED-01'
-        $script:intuneDevice = [PSCustomObject]@{ Id = 'intune1'; AzureAdDeviceId = 'aad-device-1'; SerialNumber = '5CD3271HSD'; DeviceName = 'SCRAPPED-01' }
-        $script:autopilotDevice = [PSCustomObject]@{ Id = 'ap1'; AzureActiveDirectoryDeviceId = 'aad-device-1'; ManagedDeviceId = 'intune1'; SerialNumber = '5CD3271HSD'; EnrollmentState = 'enrolled' }
+        $script:intuneDevice = [PSCustomObject]@{ Id = 'intune1'; AzureAdDeviceId = 'aad-device-1'; SerialNumber = 'TESTSN0001'; DeviceName = 'SCRAPPED-01' }
+        $script:autopilotDevice = [PSCustomObject]@{ Id = 'ap1'; AzureActiveDirectoryDeviceId = 'aad-device-1'; ManagedDeviceId = 'intune1'; SerialNumber = 'TESTSN0001'; EnrollmentState = 'enrolled' }
     }
 
     It 'matches a serial number across Autopilot, Intune, and Entra' {
-        $result = Resolve-ScrappedDeviceRecords -SerialNumbers @('5CD3271HSD') -EntraDevices @($script:entraDevice) `
+        $result = Resolve-ScrappedDeviceRecords -SerialNumbers @('TESTSN0001') -EntraDevices @($script:entraDevice) `
             -IntuneDevices @($script:intuneDevice) -AutopilotDevices @($script:autopilotDevice) -RunId 'r1'
 
         $result | Should -Not -BeNullOrEmpty
@@ -58,7 +58,7 @@ Describe 'Resolve-ScrappedDeviceRecords' {
     }
 
     It 'is case-insensitive when matching the input serial number' {
-        $result = Resolve-ScrappedDeviceRecords -SerialNumbers @('5cd3271hsd') -EntraDevices @($script:entraDevice) `
+        $result = Resolve-ScrappedDeviceRecords -SerialNumbers @('testsn0001') -EntraDevices @($script:entraDevice) `
             -IntuneDevices @($script:intuneDevice) -AutopilotDevices @($script:autopilotDevice) -RunId 'r1'
 
         ($result | Where-Object { $_.MatchStatus -eq 'Matched' }).Count | Should -BeGreaterThan 0
@@ -66,10 +66,10 @@ Describe 'Resolve-ScrappedDeviceRecords' {
 
     It 'returns every related Entra and Intune object for a serial that exists in Autopilot' {
         $entraDeviceTwo = New-TestEntraDevice -Id 'entra2' -DeviceId 'aad-device-2' -DisplayName 'SCRAPPED-02'
-        $intuneDeviceTwo = [PSCustomObject]@{ Id = 'intune2'; AzureAdDeviceId = 'aad-device-2'; SerialNumber = '5CD3271HSD'; DeviceName = 'SCRAPPED-02' }
-        $autopilotDevice = [PSCustomObject]@{ Id = 'ap1'; AzureActiveDirectoryDeviceId = 'aad-device-1'; ManagedDeviceId = 'intune1'; SerialNumber = '5CD3271HSD'; EnrollmentState = 'enrolled' }
+        $intuneDeviceTwo = [PSCustomObject]@{ Id = 'intune2'; AzureAdDeviceId = 'aad-device-2'; SerialNumber = 'TESTSN0001'; DeviceName = 'SCRAPPED-02' }
+        $autopilotDevice = [PSCustomObject]@{ Id = 'ap1'; AzureActiveDirectoryDeviceId = 'aad-device-1'; ManagedDeviceId = 'intune1'; SerialNumber = 'TESTSN0001'; EnrollmentState = 'enrolled' }
 
-        $result = Resolve-ScrappedDeviceRecords -SerialNumbers @('5CD3271HSD') -EntraDevices @($script:entraDevice, $entraDeviceTwo) `
+        $result = Resolve-ScrappedDeviceRecords -SerialNumbers @('TESTSN0001') -EntraDevices @($script:entraDevice, $entraDeviceTwo) `
             -IntuneDevices @($script:intuneDevice, $intuneDeviceTwo) -AutopilotDevices @($autopilotDevice) -RunId 'r1'
 
         $result.Count | Should -Be 5
@@ -80,8 +80,8 @@ Describe 'Resolve-ScrappedDeviceRecords' {
     }
 
     It 'flags a duplicate serial number as Ambiguous and never selects a single match when there is no Autopilot authority' {
-        $duplicateIntune = [PSCustomObject]@{ Id = 'intune2'; AzureAdDeviceId = 'aad-device-2'; SerialNumber = '5CD3271HSD'; DeviceName = 'SCRAPPED-02' }
-        $result = Resolve-ScrappedDeviceRecords -SerialNumbers @('5CD3271HSD') -EntraDevices @($script:entraDevice) `
+        $duplicateIntune = [PSCustomObject]@{ Id = 'intune2'; AzureAdDeviceId = 'aad-device-2'; SerialNumber = 'TESTSN0001'; DeviceName = 'SCRAPPED-02' }
+        $result = Resolve-ScrappedDeviceRecords -SerialNumbers @('TESTSN0001') -EntraDevices @($script:entraDevice) `
             -IntuneDevices @($script:intuneDevice, $duplicateIntune) -AutopilotDevices @() -RunId 'r1'
 
         $result[0].MatchStatus | Should -Be 'Ambiguous'
@@ -141,7 +141,7 @@ Describe 'Invoke-ScrappedDeviceRemoval' {
                 [string]$AutopilotIdentityId = 'ap1',
                 [string]$IntuneManagedDeviceId = 'intune1',
                 [string]$EntraObjectId = 'entra1',
-                [string]$InputSerialNumber = '5CD3271HSD'
+                [string]$InputSerialNumber = 'TESTSN0001'
             )
             [PSCustomObject]@{
                 RunId                    = 'r1'
