@@ -16,6 +16,7 @@ by `Export-ReportCsv`). Every row includes the run's `RunId`.
 | `AmbiguousMatches.csv` | Subset with `MatchStatus = Ambiguous` |
 | `ExcludedDevices.csv` | Subset with `Decision = Excluded` |
 | `ErrorDevices.csv` | Subset with a non-null `ErrorMessage` |
+| `OnPremisesSyncedReview.csv` | Stale client devices excluded specifically by the default on-premises sync protection; header-only when there are no such devices |
 | `ScrappedDeviceResults.csv` | One row per actual object to remove for each serial from `-ScrappedDeviceCsvPath`, expanded when a serial is Autopilot-authoritative; empty (headers only) when the parameter is not supplied |
 | `RunSummary.json` | Machine-readable run outcome (counts, exit code, timestamps) |
 | `ExecutionLog.txt` | Human-readable structured log (DEBUG/INFO/WARNING/ERROR/SUCCESS) |
@@ -40,6 +41,16 @@ Entra lifecycle statuses include `Removed`, `WhatIf`, `Skipped`, and
 counts, and `ExecutionLog.txt` records the same counts at planning and
 completion. `RunSummary.json` also includes
 `TotalAutopilotRemovalSubmitted` separately from `TotalAutopilotRemoved`.
+It also records `TotalOnPremisesSyncedReview` and whether the explicit
+`AllowOnPremisesSyncedDeletion` override was enabled.
+
+`OnPremisesSyncedReview.csv` contains only otherwise-stale devices excluded
+because they are synchronized from on-premises Active Directory. It includes
+the Entra identifiers and available activity, sync, Intune, and Autopilot
+evidence for an administrator to investigate in source AD. The
+`SourceADDeletionSafety` field is always `NotAssessed`: this report is not a
+recommendation or authorization to delete an AD computer object. This script
+does not inspect or modify source Active Directory.
 
 ## Scrapped-device columns
 
@@ -83,7 +94,7 @@ reviewed before confirmation.
 
 `MissingAllActivity`, `UnsupportedPlatform`, `MissingOperatingSystem`,
 `AmbiguousAutopilotMatch`, `DuplicateSerialNumber`, `LowConfidenceMatch`,
-`ProtectedDevice`, `RecentActivityDetected`, `DisabledTracking`,
+`ProtectedDevice`, `OnPremisesSyncProtected`, `RecentActivityDetected`, `DisabledTracking`,
 `Stale`.
 
 (`IncompleteGraphData`, `ConflictingIdentifiers`, and `GraphReadError` are

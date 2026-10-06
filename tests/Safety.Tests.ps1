@@ -37,6 +37,8 @@ Describe 'Parameter validation' {
 
         $scriptContent | Should -Match "requiredModuleVersion = \[version\]'1\.0\.2'"
         $scriptContent | Should -Match 'loadedModule\.Version -eq \$requiredModuleVersion'
+        $scriptContent | Should -Match "Get-Command -Name 'New-RunSummary'.*ErrorAction SilentlyContinue"
+        $scriptContent | Should -Match "newRunSummaryCommand\.Parameters\.ContainsKey\('AllowOnPremisesSyncedDeletion'\)"
         $scriptContent | Should -Match "Get-ScrappedDeviceSerialNumbers'.*ErrorAction SilentlyContinue"
         $scriptContent | Should -Match "getScrappedSerialsCommand\.Parameters\.ContainsKey\('Statistics'\)"
         $scriptContent | Should -Match "showScrappedSummaryCommand\.Parameters\.ContainsKey\('CsvDuplicateCount'\)"

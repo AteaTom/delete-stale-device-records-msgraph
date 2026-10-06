@@ -42,19 +42,22 @@ portal to synchronize. Microsoft notes that deregistration can take time; use
 remains visible. `RemovalFailed` means the identity DELETE failed and the
 related Entra removal was intentionally skipped.
 
-## RunSummary reports fewer disabled devices than the execution log
+## RunSummary planned and completed removal counts differ
 
-This indicates that a destructive run ended before its normal completion
-checkpoint. Current versions always persist the in-memory lifecycle state and
-rewrite reports from `finally`. Unprocessed candidates receive an error, and
-the run exits with code 6 instead of reporting success. For an older affected
-run, recover successful IDs and their timestamps from `ExecutionLog.txt`
-before using the lifecycle state for retention decisions.
+The two Entra counts report different stages of the run:
 
-Audit runs and cancelled Interactive runs do not persist newly tracked
-disabled-device timestamps. The lifecycle ledger is checkpointed only after a
-destructive confirmation, so pressing Enter at the confirmation prompt cannot
-change the next run's summary.
+- `TotalEntraDevicesToRemove` is the planned count: evaluated candidates whose
+  `EntraAction` is `Remove`. It can be nonzero in Audit mode, with `-WhatIf`,
+  or when an execution-mode gate prevents deletion.
+- `TotalEntraDevicesRemoved` counts devices whose Entra removal completed and
+  whose `EntraRemovalStatus` is `Removed`.
+
+The completed count can therefore be lower than the planned count when no
+destructive operation was authorized, `-WhatIf` was used, discovery or
+permissions prevented deletion, an Autopilot removal failed, or an Entra
+removal failed. Check `Mode`, `WhatIfMode`, `ConfirmationGranted`,
+`DiscoveryComplete`, `ExitCode`, per-device removal statuses, and
+`ExecutionLog.txt` to see why planned removals were not completed.
 
 ## Autopilot removal reports a missing bulk route
 

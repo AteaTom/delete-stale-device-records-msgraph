@@ -709,7 +709,7 @@ function Get-StaleDeviceCandidates {
         } elseif ($activity.EffectiveLastActivityUtc -gt $CutoffDateUtc) {
             $decision = 'Excluded'; $reasonCode = 'RecentActivityDetected'; $reasonDescription = 'Effective last activity is newer than the inactivity threshold.'
         } elseif ($device.OnPremisesSyncEnabled -eq $true -and -not $AllowOnPremisesSyncedDeletion) {
-            $decision = 'Excluded'; $reasonCode = 'ProtectedDevice'; $reasonDescription = 'Device is synchronized from on-premises Active Directory and is protected by default.'
+            $decision = 'Excluded'; $reasonCode = 'OnPremisesSyncProtected'; $reasonDescription = 'Device is stale by available cloud activity evidence but is synchronized from on-premises Active Directory. Source AD deletion safety has not been assessed; manual review is required.'
         } else {
             $decision = 'Candidate'; $reasonCode = 'Stale'; $reasonDescription = 'Effective last activity is older than or equal to the configured inactivity threshold; the Entra device will be removed directly.'; $entraAction = 'Remove'
         }
@@ -820,7 +820,7 @@ function Show-CleanupSummary {
     Write-Host 'Excluded or manual review:'
     Write-Host ("  Missing all activity:         {0}" -f @($manualReview | Where-Object ReasonCode -eq 'MissingAllActivity').Count)
     Write-Host ("  Ambiguous matches:            {0}" -f @($manualReview | Where-Object { $_.ReasonCode -in 'AmbiguousAutopilotMatch', 'DuplicateSerialNumber' }).Count)
-    Write-Host ("  Protected devices:            {0}" -f @($excluded | Where-Object ReasonCode -eq 'ProtectedDevice').Count)
+    Write-Host ("  Protected devices:            {0}" -f @($excluded | Where-Object { $_.ReasonCode -in 'ProtectedDevice', 'OnPremisesSyncProtected' }).Count)
     Write-Host ("  Server / unsupported:         {0}" -f @($excluded | Where-Object ReasonCode -eq 'UnsupportedPlatform').Count)
     Write-Host ("  Recent activity detected:     {0}" -f @($excluded | Where-Object ReasonCode -eq 'RecentActivityDetected').Count)
     Write-Host ("  Missing operating system:     {0}" -f @($manualReview | Where-Object ReasonCode -eq 'MissingOperatingSystem').Count)
@@ -901,12 +901,19 @@ function Export-ReportCsv {
     [CmdletBinding()]
     param(
         [AllowNull()][object[]]$InputObject,
+        [AllowEmptyCollection()][string[]]$Headers = @(),
         [Parameter(Mandatory)][string]$Path
     )
 
     $items = @($InputObject | Where-Object { $_ })
     if ($items.Count -gt 0) {
         $items | Export-Csv -Path $Path -NoTypeInformation -Encoding utf8
+    } elseif ($Headers.Count -gt 0) {
+        $headerObject = [ordered]@{}
+        foreach ($header in $Headers) {
+            $headerObject[$header] = $null
+        }
+        [PSCustomObject]$headerObject | ConvertTo-Csv -NoTypeInformation | Select-Object -First 1 | Set-Content -Path $Path -Encoding utf8
     } else {
         New-Item -Path $Path -ItemType File -Force | Out-Null
     }
@@ -930,6 +937,21 @@ function Export-CleanupReports {
     $ambiguous = @($AllEvaluatedDevices | Where-Object MatchStatus -eq 'Ambiguous')
     $errors = @($AllEvaluatedDevices | Where-Object { $_.ErrorMessage })
     $deleted = @($AllEvaluatedDevices | Where-Object { $_.EntraRemovalStatus -eq 'Removed' -or $_.AutopilotRemovalStatus -in 'Removed', 'AlreadyRemoved' })
+    $onPremisesReviewFields = @(
+        'RunId', 'EvaluationTimestampUtc', 'EntraObjectId', 'EntraDeviceId', 'DeviceName',
+        'Platform', 'OperatingSystem', 'OperatingSystemVersion', 'EntraAccountEnabled',
+        'OnPremisesSyncEnabled', 'OnPremisesLastSyncDateTimeUtc', 'EffectiveLastActivityUtc',
+        'ActivitySource', 'DaysInactive', 'CutoffDateUtc', 'IntunePresent',
+        'IntuneManagedDeviceId', 'IntuneSerialNumber', 'AutopilotPresent',
+        'AutopilotIdentityId', 'AutopilotSerialNumber', 'MatchStatus', 'MatchConfidence',
+        'Decision', 'ReasonCode', 'ReasonDescription'
+    )
+    $onPremisesReviewHeaders = @($onPremisesReviewFields + 'SourceADDeletionSafety')
+    $onPremisesSyncReview = @(
+        $AllEvaluatedDevices |
+            Where-Object { $_.PSObject.Properties['ReasonCode'] -and $_.ReasonCode -eq 'OnPremisesSyncProtected' } |
+            Select-Object -Property ($onPremisesReviewFields + @{ Name = 'SourceADDeletionSafety'; Expression = { 'NotAssessed' } })
+    )
 
     Export-ReportCsv -InputObject $AllEvaluatedDevices -Path (Join-Path $OutputPath 'AllEvaluatedDevices.csv')
     Export-ReportCsv -InputObject $candidates -Path (Join-Path $OutputPath 'DeletionCandidates.csv')
@@ -938,6 +960,7 @@ function Export-CleanupReports {
     Export-ReportCsv -InputObject $ambiguous -Path (Join-Path $OutputPath 'AmbiguousMatches.csv')
     Export-ReportCsv -InputObject $excluded -Path (Join-Path $OutputPath 'ExcludedDevices.csv')
     Export-ReportCsv -InputObject $errors -Path (Join-Path $OutputPath 'ErrorDevices.csv')
+    Export-ReportCsv -InputObject $onPremisesSyncReview -Headers $onPremisesReviewHeaders -Path (Join-Path $OutputPath 'OnPremisesSyncedReview.csv')
 }
 
 function New-RunSummary {
@@ -956,6 +979,7 @@ function New-RunSummary {
         [Parameter(Mandatory)][int]$DaysInactive,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$AllEvaluatedDevices,
         [AllowEmptyCollection()][object[]]$ScrappedDeviceRecords = @(),
+        [bool]$AllowOnPremisesSyncedDeletion = $false,
         [bool]$WhatIfMode = $false,
         [bool]$ConfirmationGranted = $false,
         [bool]$DiscoveryComplete = $true,
@@ -966,6 +990,7 @@ function New-RunSummary {
     $excluded = @($AllEvaluatedDevices | Where-Object Decision -eq 'Excluded')
     $manualReview = @($AllEvaluatedDevices | Where-Object Decision -eq 'ManualReview')
     $toRemove = @($AllEvaluatedDevices | Where-Object { $_.Decision -eq 'Candidate' -and $_.PSObject.Properties['EntraAction'] -and $_.EntraAction -eq 'Remove' })
+    $onPremisesSyncReview = @($AllEvaluatedDevices | Where-Object { $_.PSObject.Properties['ReasonCode'] -and $_.ReasonCode -eq 'OnPremisesSyncProtected' })
     $deletedEntra = @($AllEvaluatedDevices | Where-Object EntraRemovalStatus -eq 'Removed')
     $deletedAutopilot = @($AllEvaluatedDevices | Where-Object AutopilotRemovalStatus -in 'Removed', 'AlreadyRemoved')
     $submittedAutopilot = @($AllEvaluatedDevices | Where-Object AutopilotRemovalStatus -eq 'RemovalSubmitted')
@@ -994,6 +1019,8 @@ function New-RunSummary {
         TotalManualReview         = $manualReview.Count
         TotalEntraDevicesToRemove  = $toRemove.Count
         TotalEntraDevicesRemoved  = $deletedEntra.Count
+        TotalOnPremisesSyncedReview = $onPremisesSyncReview.Count
+        AllowOnPremisesSyncedDeletion = $AllowOnPremisesSyncedDeletion
         TotalAutopilotRemoved     = $deletedAutopilot.Count
         TotalAutopilotRemovalSubmitted = $submittedAutopilot.Count
         ScrappedWorkflow          = ($ScrappedDeviceRecords.Count -gt 0)

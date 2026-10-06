@@ -29,11 +29,13 @@ Describe 'Export-CleanupReports' {
 
         $expectedFiles = @(
             'AllEvaluatedDevices.csv', 'DeletionCandidates.csv', 'DeletedDevices.csv',
-            'UnknownDevices.csv', 'AmbiguousMatches.csv', 'ExcludedDevices.csv', 'ErrorDevices.csv'
+            'UnknownDevices.csv', 'AmbiguousMatches.csv', 'ExcludedDevices.csv', 'ErrorDevices.csv',
+            'OnPremisesSyncedReview.csv'
         )
         foreach ($file in $expectedFiles) {
             Test-Path (Join-Path $script:testOutputPath $file) | Should -Be $true
         }
+        (Get-Content (Join-Path $script:testOutputPath 'OnPremisesSyncedReview.csv') -TotalCount 1) | Should -Match 'EntraObjectId.*ReasonDescription.*SourceADDeletionSafety'
     }
 
     It 'writes DeletionCandidates.csv containing only Candidate-decision rows' {
@@ -45,6 +47,25 @@ Describe 'Export-CleanupReports' {
         $candidates = Import-Csv (Join-Path $script:testOutputPath 'DeletionCandidates.csv')
         $candidates.Count | Should -Be 1
         $candidates[0].DeviceName | Should -Be 'A'
+    }
+
+    It 'writes only stale devices blocked by on-premises sync protection to the review CSV' {
+        $indexes = New-DeviceIndexes -IntuneDevices @() -AutopilotDevices @()
+        $cutoff = (Get-Date).ToUniversalTime().AddDays(-180)
+        $devices = @(
+            (New-TestEntraDevice -Id 'stale-sync' -DeviceId 'device-stale' -DisplayName 'STALE-SYNC' -ApproximateLastSignInDateTime (Get-Date).ToUniversalTime().AddDays(-300) -OnPremisesSyncEnabled $true),
+            (New-TestEntraDevice -Id 'recent-sync' -DeviceId 'device-recent' -DisplayName 'RECENT-SYNC' -ApproximateLastSignInDateTime (Get-Date).ToUniversalTime().AddDays(-30) -OnPremisesSyncEnabled $true),
+            (New-TestEntraDevice -Id 'missing-sync' -DeviceId 'device-missing' -DisplayName 'MISSING-SYNC' -OnPremisesSyncEnabled $true)
+        )
+        $evaluated = Get-StaleDeviceCandidates -EntraDevices $devices -Indexes $indexes -CutoffDateUtc $cutoff -RunId 'r1'
+
+        Export-CleanupReports -AllEvaluatedDevices $evaluated -OutputPath $script:testOutputPath
+
+        $review = @(Import-Csv (Join-Path $script:testOutputPath 'OnPremisesSyncedReview.csv'))
+        $review.Count | Should -Be 1
+        $review[0].EntraObjectId | Should -Be 'stale-sync'
+        $review[0].ReasonCode | Should -Be 'OnPremisesSyncProtected'
+        $review[0].SourceADDeletionSafety | Should -Be 'NotAssessed'
     }
 }
 
@@ -91,6 +112,20 @@ Describe 'New-RunSummary' {
         $summary.TotalAutopilotRemovalSubmitted | Should -Be 1
         $summary.TotalAutopilotRemoved | Should -Be 0
         $summary.TotalEntraDevicesRemoved | Should -Be 0
+    }
+
+    It 'reports stale on-premises review count and explicit override usage' {
+        $reviewDevice = [PSCustomObject]@{
+            Decision = 'Excluded'
+            ReasonCode = 'OnPremisesSyncProtected'
+            EntraRemovalStatus = 'NotAttempted'
+            AutopilotRemovalStatus = 'NotAttempted'
+            ErrorMessage = $null
+        }
+        $summary = New-RunSummary -RunId 'r5' -Mode 'Audit' -StartTimeUtc (Get-Date).ToUniversalTime() -CutoffDateUtc (Get-Date).ToUniversalTime() -DaysInactive 180 -AllEvaluatedDevices @($reviewDevice) -AllowOnPremisesSyncedDeletion $true
+
+        $summary.TotalOnPremisesSyncedReview | Should -Be 1
+        $summary.AllowOnPremisesSyncedDeletion | Should -BeTrue
     }
 
     It 'counts scrapped-device outcomes by unique serial and object ids' {
