@@ -193,6 +193,63 @@ Describe 'Action results and reconciled completion summaries' {
         @(Get-CleanupActionRecords -Plan $null).Count | Should -Be 0
     }
 
+    It 'shows concise cancellation output and preserves detailed reports for <Workflow> with WhatIf=<Simulation>' -ForEach @(
+        @{ Workflow = 'Stale'; Simulation = $false }
+        @{ Workflow = 'Stale'; Simulation = $true }
+        @{ Workflow = 'Scrapped'; Simulation = $false }
+        @{ Workflow = 'Scrapped'; Simulation = $true }
+    ) {
+        Mock Write-Host -ModuleName StaleDeviceCleanup
+        $actions = @(Get-CleanupActionRecords -Plan $plan -Records $records)
+        $workflowParameters = if ($Workflow -eq 'Scrapped') {
+            @{ ScrappedDevices = $true }
+        } else {
+            @{ CutoffDateUtc = [datetime]::UtcNow.AddDays(-180); DaysInactive = 180 }
+        }
+        $summary = New-RunSummary @workflowParameters -RunId cancelled-run -Mode Interactive -StartTimeUtc ([datetime]::UtcNow) `
+            -AllEvaluatedDevices $records -WhatIfMode $Simulation -ConfirmationGranted $false `
+            -DiscoveryComplete $true -ActionRecords $actions -ExitCode 5
+        $logPath = Join-Path $TestDrive 'cancelled.txt'
+
+        Complete-ProjectExecution -RunSummary $summary -OutputPath $TestDrive -LogPath $logPath -ActionRecords $actions
+
+        Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 2 -Exactly
+        Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -Exactly -ParameterFilter {
+            $Object -eq 'Deletion cancelled. No changes were made.'
+        }
+        Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -Exactly -ParameterFilter {
+            $Object -eq "Reports: $TestDrive"
+        }
+        $log = Get-Content $logPath -Raw
+        $log | Should -Match 'ConfirmationGranted=False DiscoveryComplete=True ExitCode=5'
+        $log | Should -Match 'Actions: Planned=10 Attempted=0 RetryAttempts=0'
+        $log | Should -Match 'NotAttempted=10'
+        $json = Get-Content (Join-Path $TestDrive 'RunSummary.json') -Raw | ConvertFrom-Json
+        $json.ExitCode | Should -Be 5
+        $json.ConfirmationGranted | Should -BeFalse
+        $json.WhatIfMode | Should -Be $Simulation
+        $json.ActionOutcomes.NotAttempted | Should -Be 10
+        $csv = @(Import-Csv (Join-Path $TestDrive 'ActionResults.csv'))
+        $csv.Count | Should -Be 10
+        @($csv | Where-Object { $_.Outcome -ne 'NotAttempted' -or [int]$_.Attempts -ne 0 }).Count | Should -Be 0
+    }
+
+    It 'does not hide errors behind a cancellation message' {
+        Mock Write-Host -ModuleName StaleDeviceCleanup
+        $summary = New-RunSummary -RunId cancelled-error-run -Mode Interactive -StartTimeUtc ([datetime]::UtcNow) `
+            -CutoffDateUtc ([datetime]::UtcNow.AddDays(-180)) -DaysInactive 180 -AllEvaluatedDevices $records `
+            -ConfirmationGranted $false -RunErrorCount 1 -ExitCode 5
+
+        Complete-ProjectExecution -RunSummary $summary -OutputPath $TestDrive -LogPath (Join-Path $TestDrive 'cancelled-error.txt')
+
+        Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 0 -Exactly -ParameterFilter {
+            $Object -eq 'Deletion cancelled. No changes were made.'
+        }
+        Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -Exactly -ParameterFilter {
+            $Object -match 'RunErrors=1'
+        }
+    }
+
     It 'keeps run-level discovery errors visible even without evaluated device rows' {
         $summary = New-RunSummary -RunId failed-run -Mode Audit -StartTimeUtc ([datetime]::UtcNow) `
             -CutoffDateUtc ([datetime]::UtcNow.AddDays(-180)) -DaysInactive 180 -AllEvaluatedDevices @() `
