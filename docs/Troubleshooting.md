@@ -112,8 +112,10 @@ account previously only had the read-only Intune scope.
 ## Scrapped parameter binding or CSV header errors
 
 Use `-ScrappedDevices`, remove `-DaysInactive`, and supply a CSV with a unique
-`SerialNumber` column. Default input is `src\scrappeddevices.csv` beside the
-script. Path-only invocation was intentionally removed in 1.2.0 so existing
+`SerialNumber` column. Default input is `config\scrappeddevices.csv`, resolved
+relative to the repository containing the script. Move any existing input from
+`src` to `config`, or supply its path using `-ScrappedDeviceCsvPath`.
+The example CSV is not used automatically. Path-only invocation was intentionally removed in 1.2.0 so existing
 automation cannot silently gain Entra deletion. `-AllowLegacyScrappedDeviceFormat`
 explicitly permits the old headerless input, not the old deletion behavior.
 

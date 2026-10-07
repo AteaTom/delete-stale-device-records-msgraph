@@ -225,6 +225,70 @@ Describe 'Scrapped script outcomes with entirely offline Graph mocks' {
         }
     }
 
+    It 'resolves the default CSV from repository config regardless of working directory' {
+        $fixtureRoot = Join-Path $TestDrive 'default-input'
+        $fixtureSrc = New-Item -Path (Join-Path $fixtureRoot 'src') -ItemType Directory
+        $fixtureConfig = New-Item -Path (Join-Path $fixtureRoot 'config') -ItemType Directory
+        $fixtureEntry = Join-Path $fixtureSrc.FullName 'Invoke-StaleDeviceCleanup.ps1'
+        Copy-Item -LiteralPath $script:entry -Destination $fixtureEntry
+        Set-Content (Join-Path $fixtureConfig.FullName 'scrappeddevices.csv') @('SerialNumber', 'SERIAL1')
+        Set-Content (Join-Path $fixtureSrc.FullName 'scrappeddevices.csv') @('SerialNumber', 'WRONG-OLD-PATH')
+        Set-Content (Join-Path $fixtureConfig.FullName 'scrappeddevices.example.csv') @('SerialNumber', 'WRONG-EXAMPLE')
+
+        Push-Location $TestDrive
+        try {
+            & $fixtureEntry -ScrappedDevices -Mode Audit -OutputPath $script:output
+        } finally {
+            Pop-Location
+        }
+
+        $run = Get-ChildItem $script:output -Directory | Select-Object -First 1
+        $rows = Import-Csv (Join-Path $run.FullName 'ScrappedDeviceResults.csv')
+        $rows.InputSerialNumber | Sort-Object -Unique | Should -Be @('SERIAL1')
+        $rows.MatchStatus | Sort-Object -Unique | Should -Be @('Matched')
+        Should -Invoke Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+        Should -Invoke Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 0
+        Should -Invoke Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 0
+    }
+
+    It 'fails closed when the config input is missing instead of using old or example input' {
+        $fixtureRoot = Join-Path $TestDrive 'missing-input'
+        $fixtureSrc = New-Item -Path (Join-Path $fixtureRoot 'src') -ItemType Directory
+        $fixtureConfig = New-Item -Path (Join-Path $fixtureRoot 'config') -ItemType Directory
+        $fixtureEntry = Join-Path $fixtureSrc.FullName 'Invoke-StaleDeviceCleanup.ps1'
+        Copy-Item -LiteralPath $script:entry -Destination $fixtureEntry
+        Set-Content (Join-Path $fixtureSrc.FullName 'scrappeddevices.csv') @('SerialNumber', 'SERIAL1')
+        Set-Content (Join-Path $fixtureConfig.FullName 'scrappeddevices.example.csv') @('SerialNumber', 'SERIAL1')
+
+        & $fixtureEntry -ScrappedDevices -Mode Automatic -ConfirmDeletion -OutputPath $script:output
+
+        $run = Get-ChildItem $script:output -Directory | Select-Object -First 1
+        $summary = Get-Content (Join-Path $run.FullName 'RunSummary.json') -Raw | ConvertFrom-Json
+        $summary.ExitCode | Should -Not -Be 0
+        Get-Content (Join-Path $run.FullName 'ExecutionLog.txt') -Raw | Should -Match 'scrappeddevices\.csv'
+        Should -Invoke Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+        Should -Invoke Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 0
+        Should -Invoke Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 0
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0
+    }
+
+    It 'honors an explicit CSV override when the repository default is unavailable' {
+        $fixtureSrc = New-Item -Path (Join-Path $TestDrive 'override-input\src') -ItemType Directory -Force
+        $fixtureEntry = Join-Path $fixtureSrc.FullName 'Invoke-StaleDeviceCleanup.ps1'
+        Copy-Item -LiteralPath $script:entry -Destination $fixtureEntry
+
+        & $fixtureEntry @script:invoke -Mode Audit
+
+        $run = Get-ChildItem $script:output -Directory | Select-Object -First 1
+        $rows = Import-Csv (Join-Path $run.FullName 'ScrappedDeviceResults.csv')
+        $rows.InputSerialNumber | Sort-Object -Unique | Should -Be @('SERIAL1')
+        $summary = Get-Content (Join-Path $run.FullName 'RunSummary.json') -Raw | ConvertFrom-Json
+        $summary.ExitCode | Should -Be 0
+        Should -Invoke Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+        Should -Invoke Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 0
+        Should -Invoke Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 0
+    }
+
     It 'performs no destructive work in <Scenario> with <Transport>' -ForEach @(
         @{ Scenario = 'Audit'; Transport = 'Individual' }, @{ Scenario = 'WhatIf'; Transport = 'Individual' },
         @{ Scenario = 'Audit'; Transport = 'JsonBatch' }, @{ Scenario = 'WhatIf'; Transport = 'JsonBatch' },

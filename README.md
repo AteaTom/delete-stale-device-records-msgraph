@@ -210,8 +210,9 @@ remains the default; no serial-based Autopilot bulk backend is proposed.
 
 For physically scrapped hardware, select `-ScrappedDevices`. This separate
 parameter set **does not accept `-DaysInactive`** and never evaluates activity.
-Audit remains the default. Maintain `src\scrappeddevices.csv` (resolved beside
-the script) with a required `SerialNumber` column, or specify
+Audit remains the default. Maintain `config\scrappeddevices.csv` (resolved
+relative to the repository containing the script, not the working directory)
+with a required `SerialNumber` column, or specify
 `-ScrappedDeviceCsvPath` as an override:
 
 ```csv
@@ -223,13 +224,16 @@ SYNTHETIC-SCRAP-002
 The default file is intentionally not populated or committed with tenant data.
 Create it from `config\scrappeddevices.example.csv` and replace the synthetic
 serials with reviewed physical-retirement instructions before use.
+Move existing `src\scrappeddevices.csv` input to `config\scrappeddevices.csv`,
+or continue using it through an explicit `-ScrappedDeviceCsvPath` override.
+The script does not fall back to the old location or the example file.
 
 ```powershell
 .\src\Invoke-StaleDeviceCleanup.ps1 -ScrappedDevices -Mode Audit
 .\src\Invoke-StaleDeviceCleanup.ps1 -ScrappedDevices -Mode Automatic `
   -ConfirmDeletion -WhatIf
 .\src\Invoke-StaleDeviceCleanup.ps1 -ScrappedDevices -Mode Interactive `
-  -ScrappedDeviceCsvPath '.\src\scrappeddevices.csv'
+  -ScrappedDeviceCsvPath '.\config\scrappeddevices.csv'
 ```
 
 Repeated CSV rows are removed case-insensitively before correlation, preserving

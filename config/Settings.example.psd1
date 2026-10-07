@@ -14,6 +14,6 @@
     ProtectedDeviceIdFile      = '.\config\ProtectedDevices.example.csv'
     ProtectedDeviceNamePattern = @('BREAKGLASS-*', 'PAW-*', 'ADMIN-*', 'KIOSK-CRITICAL-*')
     # For scrapped cleanup use a separate invocation with -ScrappedDevices,
-    # omitting DaysInactive. Default input: .\src\scrappeddevices.csv.
+    # omitting DaysInactive. Default input: config\scrappeddevices.csv in the repository.
     # Optional -ScrappedDeviceCsvPath override; strict SerialNumber header.
 }
