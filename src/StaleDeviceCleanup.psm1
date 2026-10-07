@@ -1827,9 +1827,18 @@ function Complete-ProjectExecution {
     }
     $lines += "VerificationPending=$($RunSummary.TotalVerificationPending) VerificationUnknown=$($RunSummary.TotalVerificationUnknown) DeviceOrSerialErrors=$($RunSummary.TotalErrors) RunErrors=$($RunSummary.TotalRunErrors)"
     $lines += "Reports: $OutputPath"
+    $cancelledWithoutErrors = $RunSummary.Mode -eq 'Interactive' -and $RunSummary.ExitCode -eq 5 -and
+        -not $RunSummary.ConfirmationGranted -and $RunSummary.TotalAttemptedActions -eq 0 -and
+        $RunSummary.TotalErrors -eq 0 -and $RunSummary.TotalRunErrors -eq 0
     foreach ($line in $lines) {
         Write-CleanupLog -Message $line -Level INFO -LogPath $LogPath
-        Write-Host $line
+        if (-not $cancelledWithoutErrors) {
+            Write-Host $line
+        }
+    }
+    if ($cancelledWithoutErrors) {
+        Write-Host 'Deletion cancelled. No changes were made.'
+        Write-Host "Reports: $OutputPath"
     }
 }
 

@@ -79,6 +79,13 @@ finalized `RunSummary.json` data. Additive fields include `TenantId`,
 `TotalRetryAttempts`, `ActionOutcomes`, `ActionsByResource`,
 `TotalVerificationPending`, `TotalVerificationUnknown` and `TotalRunErrors`.
 Existing JSON fields keep their meaning.
+When an administrator cancels Interactive confirmation (exit code 5), with no
+attempted deletions or reported errors, the console instead shows
+`Deletion cancelled. No changes were made.` and the report path. This applies
+to both workflows, including `-WhatIf`. The detailed completion block remains
+in `ExecutionLog.txt`, and JSON/CSV reports are still finalized with unattempted
+actions recorded as `NotAttempted`. Runs with errors retain the detailed console
+summary so cancellation does not hide failures.
 Direct module callers must supply finalized `ActionRecords` to
 `New-RunSummary` and `Complete-ProjectExecution` for operation totals and the
 action CSV; the script obtains these through `Get-CleanupActionRecords`.
