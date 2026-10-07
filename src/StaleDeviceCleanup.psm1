@@ -25,6 +25,8 @@ $script:InvalidSerialNumbers = @(
     'to be filled by o.e.m.', 'n/a', 'none', ''
 )
 
+. (Join-Path $PSScriptRoot 'DeviceDeletionBatch.ps1')
+
 #region Logging
 
 function Write-CleanupLog {
@@ -703,7 +705,9 @@ function Get-StaleDeviceCandidates {
             $reasonCode = if ($correlation.AmbiguityReason -eq 'DuplicateSerialNumber') { 'DuplicateSerialNumber' } else { 'AmbiguousAutopilotMatch' }
             $reasonDescription = "Correlation is ambiguous: $($correlation.AmbiguityReason)."
         } elseif ($platform -eq 'Windows' -and $correlation.AutopilotMatch -and $correlation.MatchConfidence -ne 'High') {
-            $decision = 'ManualReview'; $reasonCode = 'LowConfidenceMatch'; $reasonDescription = "Autopilot match confidence '$($correlation.MatchConfidence)' is below the High threshold required for automatic Autopilot deletion."
+            $decision = 'ManualReview'; $reasonCode = 'LowConfidenceMatch'; $reasonDescription = "Autopilot match confidence '$($correlation.MatchConfidence)' is insufficient for safe lifecycle correlation."
+        } elseif ($correlation.AutopilotMatch) {
+            $decision = 'Excluded'; $reasonCode = 'AutopilotProtected'; $reasonDescription = 'Autopilot-backed devices require explicit hardware deregistration, not activity-based deletion.'
         } elseif (-not $activity.EffectiveLastActivityUtc) {
             $decision = 'ManualReview'; $reasonCode = 'MissingAllActivity'; $reasonDescription = 'No authoritative activity timestamp (Intune lastSyncDateTime or Entra approximateLastSignInDateTime) is available.'
         } elseif ($activity.EffectiveLastActivityUtc -gt $CutoffDateUtc) {
@@ -791,12 +795,17 @@ function Show-CleanupSummary {
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$EvaluatedDevices,
         [Parameter(Mandatory)][datetime]$CutoffDateUtc,
         [Parameter(Mandatory)][int]$DaysInactive,
-        [Parameter(Mandatory)][string]$OutputPath
+        [Parameter(Mandatory)][string]$OutputPath,
+        [string]$TenantId = 'Not specified',
+        [ValidateSet('Audit', 'Interactive', 'Automatic')][string]$Mode = 'Audit',
+        [bool]$Simulation = $false,
+        [ValidateSet('Individual', 'JsonBatch')][string]$DeletionTransport = 'Individual'
     )
 
-    $candidates = $EvaluatedDevices | Where-Object Decision -eq 'Candidate'
-    $windowsWithAutopilot = @($candidates | Where-Object { $_.Platform -eq 'Windows' -and $_.AutopilotPresent })
-    $windowsWithoutAutopilot = @($candidates | Where-Object { $_.Platform -eq 'Windows' -and -not $_.AutopilotPresent })
+    $candidates = @($EvaluatedDevices | Where-Object {
+        $_.Decision -eq 'Candidate' -and $_.EntraAction -eq 'Remove' -and -not $_.AutopilotPresent -and $_.EntraObjectId
+    } | Sort-Object EntraObjectId -Unique)
+    $windowsWithoutAutopilot = @($candidates | Where-Object Platform -eq 'Windows')
     $ios = @($candidates | Where-Object Platform -eq 'iOS')
     $android = @($candidates | Where-Object Platform -eq 'Android')
     $toRemove = @($candidates | Where-Object EntraAction -eq 'Remove')
@@ -806,24 +815,31 @@ function Show-CleanupSummary {
 
     Write-Host ''
     Write-Host 'Stale-device cleanup summary'
+    Write-Host "Workflow: Stale Entra cleanup; tenant: $TenantId"
+    Write-Host "Mode: $Mode; WhatIf: $Simulation; transport: $DeletionTransport"
+    if ($Mode -eq 'Audit' -or $Simulation) { Write-Host 'No tenant DELETE requests will be sent.' }
     Write-Host "Cutoff date UTC: $($CutoffDateUtc.ToString('o'))"
     Write-Host "Inactivity threshold: $DaysInactive days"
     Write-Host ''
-    Write-Host 'Deletion candidates:'
-    Write-Host ("  Windows with Autopilot:       {0}" -f $windowsWithAutopilot.Count)
+    Write-Host 'Planned Entra deletions (unique objects):'
     Write-Host ("  Windows without Autopilot:    {0}" -f $windowsWithoutAutopilot.Count)
     Write-Host ("  iOS:                          {0}" -f $ios.Count)
     Write-Host ("  Android:                      {0}" -f $android.Count)
     Write-Host ("  Entra objects to remove:      {0}" -f $toRemove.Count)
-    Write-Host ("  Autopilot records to remove:  {0}" -f $windowsWithAutopilot.Count)
+    Write-Host 'No Intune or Autopilot deletion in this workflow.'
     Write-Host ''
     Write-Host 'Excluded or manual review:'
     Write-Host ("  Missing all activity:         {0}" -f @($manualReview | Where-Object ReasonCode -eq 'MissingAllActivity').Count)
     Write-Host ("  Ambiguous matches:            {0}" -f @($manualReview | Where-Object { $_.ReasonCode -in 'AmbiguousAutopilotMatch', 'DuplicateSerialNumber' }).Count)
-    Write-Host ("  Protected devices:            {0}" -f @($excluded | Where-Object { $_.ReasonCode -in 'ProtectedDevice', 'OnPremisesSyncProtected' }).Count)
+    Write-Host ("  Autopilot-backed (retained):   {0}" -f @($excluded | Where-Object ReasonCode -eq 'AutopilotProtected').Count)
+    Write-Host ("  Explicitly protected:         {0}" -f @($excluded | Where-Object ReasonCode -eq 'ProtectedDevice').Count)
+    Write-Host ("  On-premises sync protected:   {0}" -f @($excluded | Where-Object ReasonCode -eq 'OnPremisesSyncProtected').Count)
+    Write-Host ("  Low-confidence AP matches:    {0}" -f @($manualReview | Where-Object ReasonCode -eq 'LowConfidenceMatch').Count)
     Write-Host ("  Server / unsupported:         {0}" -f @($excluded | Where-Object ReasonCode -eq 'UnsupportedPlatform').Count)
     Write-Host ("  Recent activity detected:     {0}" -f @($excluded | Where-Object ReasonCode -eq 'RecentActivityDetected').Count)
     Write-Host ("  Missing operating system:     {0}" -f @($manualReview | Where-Object ReasonCode -eq 'MissingOperatingSystem').Count)
+    Write-Host ("  Total excluded:               {0}" -f @($excluded).Count)
+    Write-Host ("  Total manual review:          {0}" -f @($manualReview).Count)
     Write-Host ''
     Write-Host "Reports have been written to:"
     Write-Host "  $OutputPath"
@@ -840,7 +856,11 @@ function Show-ScrappedDeviceSummary {
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$ScrappedDeviceRecords,
         [Parameter(Mandatory)][string]$OutputPath,
-        [ValidateRange(0, [int]::MaxValue)][int]$CsvDuplicateCount = 0
+        [ValidateRange(0, [int]::MaxValue)][int]$CsvDuplicateCount = 0,
+        [string]$TenantId = 'Not specified',
+        [ValidateSet('Audit', 'Interactive', 'Automatic')][string]$Mode = 'Audit',
+        [bool]$Simulation = $false,
+        [ValidateSet('Individual', 'JsonBatch')][string]$DeletionTransport = 'Individual'
     )
 
     $inputSerials = @($ScrappedDeviceRecords | Select-Object -ExpandProperty NormalizedSerialNumber -Unique)
@@ -854,18 +874,31 @@ function Show-ScrappedDeviceSummary {
 
     Write-Host ''
     Write-Host 'Scrapped-device cleanup summary'
+    Write-Host "Workflow: Explicit scrapped hardware deregistration; tenant: $TenantId"
+    Write-Host "Mode: $Mode; WhatIf: $Simulation; transport: $DeletionTransport"
+    Write-Host 'Inactivity threshold: Not used for this workflow.'
+    if ($Mode -eq 'Audit' -or $Simulation) { Write-Host 'No tenant DELETE requests will be sent.' }
     Write-Host ("  Unique input serial numbers:   {0}" -f $inputSerials.Count)
     Write-Host ("  Duplicate CSV rows ignored:    {0}" -f $CsvDuplicateCount)
     Write-Host ("  Matched serial numbers:        {0}" -f $matchedSerials.Count)
+    Write-Host ("  Serials with DELETE targets:   {0}" -f @($matchedRecords | Where-Object {
+        $_.IntuneManagedDeviceId -or $_.AutopilotIdentityId
+    } | Select-Object -ExpandProperty NormalizedSerialNumber -Unique).Count)
     Write-Host ''
-    Write-Host 'Records to remove:'
+    Write-Host 'Planned DELETE operations (unique records, not physical devices):'
     Write-Host ("  Autopilot records:             {0}" -f $autopilotIds.Count)
     Write-Host ("  Intune managed devices:        {0}" -f $intuneIds.Count)
-    Write-Host ("  Entra device objects:          {0}" -f $entraIds.Count)
+    Write-Host ("  Total DELETE operations:       {0}" -f ($intuneIds.Count + $autopilotIds.Count))
+    Write-Host ''
+    Write-Host 'Retained in this workflow:'
+    Write-Host ("  Entra objects for review:      {0}" -f $entraIds.Count)
+    Write-Host '  Entra DELETE operations:       0'
+    Write-Host 'Order: Intune first; required success before Autopilot.'
     Write-Host ''
     Write-Host 'Excluded from deletion:'
     Write-Host ("  Ambiguous serial numbers:      {0}" -f $ambiguousSerials.Count)
     Write-Host ("  Serial numbers not found:      {0}" -f $notFoundSerials.Count)
+    Write-Host ("  Protected / out of scope:      {0}" -f @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'Excluded' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique).Count)
     Write-Host ''
     Write-Host 'Reports have been written to:'
     Write-Host "  $OutputPath"
@@ -907,7 +940,28 @@ function Export-ReportCsv {
 
     $items = @($InputObject | Where-Object { $_ })
     if ($items.Count -gt 0) {
-        $items | Export-Csv -Path $Path -NoTypeInformation -Encoding utf8
+        $exportItems = @(
+            foreach ($item in $items) {
+                $fields = [ordered]@{}
+                foreach ($property in $item.PSObject.Properties) {
+                    $value = $property.Value
+                    if ($value -is [datetimeoffset]) {
+                        $value = $value.UtcDateTime.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+                    } elseif ($value -is [datetime]) {
+                        if ($value.Kind -eq [DateTimeKind]::Unspecified) {
+                            if ($property.Name -notlike '*Utc') {
+                                throw "CSV timestamp '$($property.Name)' has no timezone and no UTC field contract."
+                            }
+                            $value = [datetime]::SpecifyKind($value, [DateTimeKind]::Utc)
+                        }
+                        $value = $value.ToUniversalTime().ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+                    }
+                    $fields[$property.Name] = $value
+                }
+                [PSCustomObject]$fields
+            }
+        )
+        $exportItems | Export-Csv -Path $Path -NoTypeInformation -Encoding utf8
     } elseif ($Headers.Count -gt 0) {
         $headerObject = [ordered]@{}
         foreach ($header in $Headers) {
@@ -1019,6 +1073,7 @@ function New-RunSummary {
         TotalManualReview         = $manualReview.Count
         TotalEntraDevicesToRemove  = $toRemove.Count
         TotalEntraDevicesRemoved  = $deletedEntra.Count
+        TotalEntraDevicesAlreadyAbsent = @($AllEvaluatedDevices | Where-Object EntraRemovalStatus -eq 'AlreadyAbsent').Count
         TotalOnPremisesSyncedReview = $onPremisesSyncReview.Count
         AllowOnPremisesSyncedDeletion = $AllowOnPremisesSyncedDeletion
         TotalAutopilotRemoved     = $deletedAutopilot.Count
@@ -1028,6 +1083,8 @@ function New-RunSummary {
         TotalScrappedMatchedSerials = $scrappedMatchedSerials.Count
         TotalScrappedAmbiguousSerials = $scrappedAmbiguousSerials.Count
         TotalScrappedNotFoundSerials = $scrappedNotFoundSerials.Count
+        TotalScrappedExcludedSerials = @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'Excluded' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique).Count
+        TotalScrappedEntraReview = @($ScrappedDeviceRecords | Where-Object EntraObjectId | Select-Object -ExpandProperty EntraObjectId -Unique).Count
         TotalScrappedAutopilotRemovalSubmitted = $scrappedSubmittedAutopilot.Count
         TotalScrappedIntuneDevicesRemoved = $scrappedRemovedIntune.Count
         TotalScrappedEntraDevicesRemoved = $scrappedRemovedEntra.Count
@@ -1100,11 +1157,18 @@ function Resolve-ScrappedDeviceRecords {
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$EntraDevices,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$IntuneDevices,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$AutopilotDevices,
-        [Parameter(Mandatory)][string]$RunId
+        [Parameter(Mandatory)][string]$RunId,
+        [string[]]$ProtectedEntraObjectIds = @(),
+        [string[]]$ProtectedEntraDeviceIds = @(),
+        [string[]]$ProtectedSerialNumbers = @(),
+        [string[]]$ProtectedDeviceNames = @(),
+        [string[]]$ProtectedNamePatterns = @()
     )
 
     $intuneBySerial = @{}
+    $intuneById = @{}
     foreach ($d in $IntuneDevices) {
+        if ($d.Id) { $intuneById[[string]$d.Id] = $d }
         $serial = ConvertTo-NormalizedSerialNumber -SerialNumber $d.SerialNumber
         if ($serial) {
             if (-not $intuneBySerial.ContainsKey($serial)) { $intuneBySerial[$serial] = [System.Collections.Generic.List[object]]::new() }
@@ -1176,6 +1240,70 @@ function Resolve-ScrappedDeviceRecords {
                     }
                 }
             }
+        }
+
+        $exclusion = $null
+        $platforms = @(
+            foreach ($device in $entraMatches) { Resolve-DevicePlatform -OperatingSystem $device.OperatingSystem }
+            foreach ($device in $intuneMatches) {
+                $os = & $getSafeValue $device 'OperatingSystem'
+                Resolve-DevicePlatform -OperatingSystem $os
+            }
+        )
+        if (@($platforms | Where-Object { $_ -notin 'Windows', 'iOS', 'Android' }).Count -gt 0) {
+            $exclusion = 'UnsupportedOrMissingPlatform'
+        } elseif ($autopilotMatches.Count -gt 0 -and @($platforms | Where-Object { $_ -ne 'Windows' }).Count -gt 0) {
+            $exclusion = 'ConflictingPlatform'
+        } elseif ($autopilotMatches.Count -gt 1) {
+            $exclusion = 'DuplicateAutopilotSerial'
+        } elseif (@($intuneMatches | Select-Object -ExpandProperty Id -Unique).Count -gt 1 -or $entraMatches.Count -gt 1) {
+            $exclusion = 'DuplicateSerialNumber'
+        }
+        if ($autopilotMatches.Count -eq 1 -and $intuneMatches.Count -eq 1) {
+            $autopilotManagedId = & $getSafeValue $autopilotMatches[0] 'ManagedDeviceId'
+            $autopilotEntraId = & $getSafeValue $autopilotMatches[0] 'AzureActiveDirectoryDeviceId'
+            if (($autopilotManagedId -and $autopilotManagedId -ne $intuneMatches[0].Id) -or
+                ($autopilotEntraId -and $intuneMatches[0].AzureAdDeviceId -and $autopilotEntraId -ne $intuneMatches[0].AzureAdDeviceId)) {
+                $exclusion = 'ConflictingIdentifiers'
+            }
+        }
+        if ($autopilotMatches.Count -eq 1) {
+            $managedId = & $getSafeValue $autopilotMatches[0] 'ManagedDeviceId'
+            if ($managedId -and $intuneById.ContainsKey([string]$managedId)) {
+                $linkedSerial = ConvertTo-NormalizedSerialNumber -SerialNumber $intuneById[[string]$managedId].SerialNumber
+                if ($linkedSerial -ne $normalized) { $exclusion = 'ConflictingIdentifiers' }
+            }
+        }
+        $protectionDevices = @($entraMatches) + @($intuneMatches | ForEach-Object {
+            [PSCustomObject]@{ Id = $null; DeviceId = $_.AzureAdDeviceId; DisplayName = & $getSafeValue $_ 'DeviceName' }
+        })
+        $protectionDevices += @($autopilotMatches | ForEach-Object {
+            [PSCustomObject]@{
+                Id = $null
+                DeviceId = & $getSafeValue $_ 'AzureActiveDirectoryDeviceId'
+                DisplayName = $null
+            }
+        })
+        $protectionDevices += [PSCustomObject]@{ Id = $null; DeviceId = $null; DisplayName = $null }
+        foreach ($device in $protectionDevices) {
+            $protection = Test-DeviceProtection -Device $device -IntuneSerialNumber $inputSerial `
+                -ProtectedEntraObjectIds $ProtectedEntraObjectIds -ProtectedEntraDeviceIds $ProtectedEntraDeviceIds `
+                -ProtectedSerialNumbers $ProtectedSerialNumbers -ProtectedDeviceNames $ProtectedDeviceNames `
+                -ProtectedNamePatterns $ProtectedNamePatterns
+            if ($protection.IsProtected) { $exclusion = 'ProtectedDevice' }
+        }
+        if ($exclusion) {
+            $results.Add([PSCustomObject][ordered]@{
+                RunId = $RunId; InputSerialNumber = $inputSerial; NormalizedSerialNumber = $normalized
+                MatchStatus = $(if ($exclusion -in 'DuplicateSerialNumber', 'DuplicateAutopilotSerial') { 'Ambiguous' } else { 'Excluded' })
+                AmbiguityReason = $exclusion
+                AutopilotIdentityId = $null; AutopilotEnrollmentState = $null
+                IntuneManagedDeviceId = $null; IntuneDeviceName = $null
+                EntraObjectId = $null; EntraDeviceName = $null
+                AutopilotRemovalStatus = 'NotAttempted'; IntuneRemovalStatus = 'NotAttempted'
+                EntraRemovalStatus = 'NotAttempted'; ErrorMessage = $null
+            })
+            continue
         }
 
         if ($autopilotMatches.Count -gt 0) {
@@ -1251,7 +1379,7 @@ function Resolve-ScrappedDeviceRecords {
                     EntraDeviceName          = & $getSafeValue $entraMatch 'DisplayName'
                     AutopilotRemovalStatus   = 'NotAttempted'
                     IntuneRemovalStatus      = 'NotAttempted'
-                    EntraRemovalStatus       = 'NotAttempted'
+                    EntraRemovalStatus       = 'ManualReview'
                     ErrorMessage             = $null
                 }
                 $rowKey = [string]::Join('|', @('Entra', $row.EntraObjectId))
@@ -1288,7 +1416,7 @@ function Resolve-ScrappedDeviceRecords {
             EntraDeviceName          = if ($entraMatch) { & $getSafeValue $entraMatch 'DisplayName' } else { $null }
             AutopilotRemovalStatus   = 'NotAttempted'
             IntuneRemovalStatus      = 'NotAttempted'
-            EntraRemovalStatus       = 'NotAttempted'
+            EntraRemovalStatus       = if ($entraMatch) { 'ManualReview' } else { 'NotAttempted' }
             ErrorMessage             = $null
         })
     }
@@ -1328,7 +1456,8 @@ function Submit-WindowsAutopilotIdentityRemoval {
     [OutputType([object[]])]
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Targets,
-        [string]$LogPath
+        [string]$LogPath,
+        [string]$ExpectedTenantId
     )
 
     $seenIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -1339,6 +1468,9 @@ function Submit-WindowsAutopilotIdentityRemoval {
         $errorMessage = $null
         if ($PSCmdlet.ShouldProcess($target.IdentityId, 'Remove Windows Autopilot device identity')) {
             try {
+                if ($ExpectedTenantId) {
+                    Assert-DeviceCleanupContext -TenantId $ExpectedTenantId -RequiredScopes @('DeviceManagementServiceConfig.ReadWrite.All')
+                }
                 Remove-WindowsAutopilotRecord -WindowsAutopilotDeviceIdentityId $target.IdentityId -LogPath $LogPath -SuppressErrorLog -Confirm:$false | Out-Null
                 $status = 'RemovalSubmitted'
             } catch {
@@ -1352,7 +1484,7 @@ function Submit-WindowsAutopilotIdentityRemoval {
                 }
             }
         } else {
-            $status = 'WhatIf'
+            $status = if ($WhatIfPreference) { 'WhatIf' } else { 'Declined' }
         }
         $results.Add([PSCustomObject][ordered]@{
                 IdentityId   = [string]$target.IdentityId
@@ -1430,34 +1562,35 @@ function Remove-IntuneManagedDeviceRecord {
 function Invoke-ScrappedDeviceRemoval {
     <#
         .SYNOPSIS
-        Removes unique Intune records, submits unique matched Autopilot serials
-        to Microsoft Graph in sequential chunks of at most 100, then removes
-        unique Entra records.
-        An accepted bulk state permits downstream cleanup without waiting for
-        eventual Autopilot portal consistency. Failed, error, unknown, or
-        missing states block downstream cleanup for that serial. Ambiguous and
-        NotFound records are left untouched.
+        Removes unique Intune records before related Autopilot identities.
+        Failed Intune prerequisites block deregistration. Entra objects are
+        retained for manual review. Only validated Matched records are used.
     #>
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$ScrappedDeviceRecords,
-        [string]$LogPath
+        [string]$LogPath,
+        [string]$ExpectedTenantId
     )
 
     $matchedRecords = @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'Matched')
-    $seenIntuneIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $intuneStates = @{}
     $loggedAutopilotErrorSerials = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($record in $matchedRecords) {
         if (-not $record.IntuneManagedDeviceId) {
             $record.IntuneRemovalStatus = 'NotApplicable'
             continue
         }
-        if (-not $seenIntuneIds.Add([string]$record.IntuneManagedDeviceId)) {
-            $record.IntuneRemovalStatus = 'DuplicateSkipped'
+        if ($intuneStates.ContainsKey([string]$record.IntuneManagedDeviceId)) {
+            $record.IntuneRemovalStatus = $intuneStates[[string]$record.IntuneManagedDeviceId].Status
+            $record.ErrorMessage = $intuneStates[[string]$record.IntuneManagedDeviceId].ErrorMessage
             continue
         }
 
         try {
+            if ($ExpectedTenantId) {
+                Assert-DeviceCleanupContext -TenantId $ExpectedTenantId -RequiredScopes @('DeviceManagementManagedDevices.ReadWrite.All')
+            }
             $intuneRemoved = Remove-IntuneManagedDeviceRecord -ManagedDeviceId $record.IntuneManagedDeviceId -LogPath $LogPath -WhatIf:$WhatIfPreference -Confirm:$false
             if ($WhatIfPreference) {
                 $record.IntuneRemovalStatus = 'WhatIf'
@@ -1472,19 +1605,34 @@ function Invoke-ScrappedDeviceRemoval {
             $record.ErrorMessage = $_.Exception.Message
             Write-CleanupLog -Message "Failed to remove Intune managed device '$($record.IntuneManagedDeviceId)' for scrapped device serial '$($record.InputSerialNumber)': $($_.Exception.Message)" -Level ERROR -LogPath $LogPath
         }
+        $intuneStates[[string]$record.IntuneManagedDeviceId] = @{
+            Status = $record.IntuneRemovalStatus; ErrorMessage = $record.ErrorMessage
+        }
     }
 
-    $autopilotTargets = @($matchedRecords | Where-Object AutopilotIdentityId | ForEach-Object {
+    $blockedSerials = @($matchedRecords | Where-Object {
+        $_.IntuneManagedDeviceId -and $_.IntuneRemovalStatus -ne 'Removed' -and
+        -not ($WhatIfPreference -and $_.IntuneRemovalStatus -eq 'WhatIf')
+    } | Select-Object -ExpandProperty NormalizedSerialNumber -Unique)
+    $autopilotTargets = @($matchedRecords | Where-Object {
+        $_.AutopilotIdentityId -and $_.NormalizedSerialNumber -notin $blockedSerials
+    } | ForEach-Object {
             [PSCustomObject]@{ IdentityId = $_.AutopilotIdentityId; SerialNumber = $_.InputSerialNumber }
         })
     $identityStates = @{}
-    foreach ($identityState in @(Submit-WindowsAutopilotIdentityRemoval -Targets $autopilotTargets -LogPath $LogPath -WhatIf:$WhatIfPreference -Confirm:$false)) {
+    foreach ($identityState in @(Submit-WindowsAutopilotIdentityRemoval -Targets $autopilotTargets -LogPath $LogPath `
+        -ExpectedTenantId $ExpectedTenantId -WhatIf:$WhatIfPreference -Confirm:$false)) {
         $identityStates[[string]$identityState.IdentityId] = $identityState
     }
 
     foreach ($record in $matchedRecords) {
         if (-not $record.AutopilotIdentityId) {
             $record.AutopilotRemovalStatus = 'NotApplicable'
+            continue
+        }
+        if ($record.NormalizedSerialNumber -in $blockedSerials) {
+            $record.AutopilotRemovalStatus = 'BlockedDependency'
+            $record.ErrorMessage = 'Required Intune removal did not succeed.'
             continue
         }
 
@@ -1505,34 +1653,8 @@ function Invoke-ScrappedDeviceRemoval {
         }
     }
 
-    $seenEntraIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($record in $matchedRecords) {
-        $autopilotBlocking = $record.AutopilotIdentityId -and $record.AutopilotRemovalStatus -notin 'RemovalSubmitted', 'WhatIf'
-
-        try {
-            if ($record.EntraObjectId) {
-                if ($autopilotBlocking) {
-                    $record.EntraRemovalStatus = 'SkippedAutopilotSubmissionFailed'
-                } elseif (-not $seenEntraIds.Add([string]$record.EntraObjectId)) {
-                    $record.EntraRemovalStatus = 'DuplicateSkipped'
-                } else {
-                    $entraRemoved = Remove-EntraDeviceRecord -EntraObjectId $record.EntraObjectId -LogPath $LogPath -WhatIf:$WhatIfPreference -Confirm:$false
-                    if ($WhatIfPreference) {
-                        $record.EntraRemovalStatus = 'WhatIf'
-                    } elseif ($entraRemoved) {
-                        $record.EntraRemovalStatus = 'Removed'
-                        Write-CleanupLog -Message "Removed Entra device object '$($record.EntraObjectId)' for scrapped device serial '$($record.InputSerialNumber)'." -Level SUCCESS -LogPath $LogPath
-                    } else {
-                        $record.EntraRemovalStatus = 'Skipped'
-                    }
-                }
-            } else {
-                $record.EntraRemovalStatus = 'NotApplicable'
-            }
-        } catch {
-            $record.ErrorMessage = $_.Exception.Message
-            Write-CleanupLog -Message "Failed to process scrapped device serial '$($record.InputSerialNumber)': $($_.Exception.Message)" -Level ERROR -LogPath $LogPath
-        }
+        $record.EntraRemovalStatus = if ($record.EntraObjectId) { 'ManualReview' } else { 'NotApplicable' }
     }
 }
 
@@ -1621,4 +1743,9 @@ Export-ModuleMember -Function @(
     'Invoke-ScrappedDeviceRemoval',
     'Initialize-ProjectExecution',
     'Complete-ProjectExecution'
+    'New-DeviceDeletionPlan'
+    'Invoke-DeviceDeletionPlan'
+    'Set-DeviceDeletionResults'
+    'Test-DeviceDeletionOutcome'
+    'Assert-DeviceCleanupContext'
 )
