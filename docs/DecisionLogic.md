@@ -108,8 +108,13 @@ After confirmation, the scrapped-device operation follows this order:
    DELETE endpoint.
 3. Treat a successful response as an accepted asynchronous submission and
    continue without polling for the Autopilot record to disappear.
-4. Remove each unique related Entra object once. A failed identity DELETE
-   blocks Entra removal for that identity's serial.
+4. Remove each unique related Entra object once, unless any related
+   Autopilot submission failed or has a missing/unknown outcome.
+
+Each target is processed through its own Microsoft Graph request with bounded
+retries for transient errors. This is batching of the input collection only;
+it does not use a Graph JSON batch request. A target failure is recorded on
+the corresponding result row and does not stop unrelated targets.
 
 ## Decision precedence (evaluated in order per device)
 

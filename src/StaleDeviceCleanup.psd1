@@ -39,6 +39,7 @@
         'Submit-WindowsAutopilotIdentityRemoval',
         'Remove-EntraDeviceRecord',
         'Remove-IntuneManagedDeviceRecord',
+        'Invoke-ScrappedDeviceBatchRemoval',
         'Invoke-ScrappedDeviceRemoval',
         'Initialize-ProjectExecution',
         'Complete-ProjectExecution'

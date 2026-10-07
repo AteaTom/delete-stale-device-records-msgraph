@@ -194,8 +194,13 @@ records, and it only ever acts on the serial numbers you explicitly listed.
 It follows Microsoft's deregistration order by removing unique Intune records
 first and then submitting each unique Autopilot identity through the supported
 identity DELETE. The script does not poll for portal synchronization, because
-that can take several minutes. A failed DELETE blocks Entra removal for that
-serial. The workflow uses the same
+that can take several minutes. Each unique target is processed with an
+individual Graph request and the existing bounded transient-error retry
+policy; this is collection-level batch processing, not a Microsoft Graph JSON
+batch request. A failed, missing, or unknown Autopilot result blocks Entra
+removal for every related object, while failures for one target are recorded
+without stopping unrelated targets. Already-absent objects are reported
+separately from successful new removals. The workflow uses the same
 Mode/`-WhatIf`/`-ConfirmDeletion` gating as the rest of the tool and does not
 run the standard stale-device lifecycle in the same execution. Before
 confirmation, the console shows the exact unique target counts, and

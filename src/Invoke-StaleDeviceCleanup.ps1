@@ -61,10 +61,13 @@
     device serial number per line (header optional). Every serial number that
     matches a Windows Autopilot identity, Intune managed device, and/or Entra
     device object is submitted for removal from the applicable systems,
-    independent of activity, disabled-state, or platform. Intune records are
-    removed first, then the Autopilot identity is submitted through the
-    supported identity DELETE endpoint. A successful submission permits the
-    related Entra cleanup without waiting for Autopilot portal synchronization.
+    independent of activity, disabled-state, or platform. Unique Intune
+    targets are removed first, unique Autopilot identities are submitted
+    second, then eligible unique Entra objects are removed. Each target uses
+    an individual retry-enabled Graph request; per-target failures are
+    reported and do not stop unrelated targets. A successful Autopilot
+    submission permits related Entra cleanup without waiting for portal
+    synchronization.
     Ambiguous (duplicate serial) or unmatched
     entries are reported but never acted on. Duplicate rows in the input file
     are ignored case-insensitively and counted in the pre-deletion summary.
@@ -134,6 +137,7 @@ $newRunSummaryCommand = Get-Command -Name 'New-RunSummary' -ErrorAction Silently
 $getScrappedSerialsCommand = Get-Command -Name 'Get-ScrappedDeviceSerialNumbers' -ErrorAction SilentlyContinue
 $showScrappedSummaryCommand = Get-Command -Name 'Show-ScrappedDeviceSummary' -ErrorAction SilentlyContinue
 $submitAutopilotIdentityCommand = Get-Command -Name 'Submit-WindowsAutopilotIdentityRemoval' -ErrorAction SilentlyContinue
+$scrappedBatchRemovalCommand = Get-Command -Name 'Invoke-ScrappedDeviceBatchRemoval' -ErrorAction SilentlyContinue
 $moduleIsCurrent = $loadedModule `
     -and $loadedModule.Version -eq $requiredModuleVersion `
     -and $removeAutopilotCommand `
@@ -144,7 +148,8 @@ $moduleIsCurrent = $loadedModule `
     -and $getScrappedSerialsCommand.Parameters.ContainsKey('Statistics') `
     -and $showScrappedSummaryCommand `
     -and $showScrappedSummaryCommand.Parameters.ContainsKey('CsvDuplicateCount') `
-    -and $submitAutopilotIdentityCommand
+    -and $submitAutopilotIdentityCommand `
+    -and $scrappedBatchRemovalCommand
 if (-not $moduleIsCurrent) {
     Import-Module -Name $modulePath -Force
 }
@@ -273,12 +278,20 @@ try {
             }
         }
 
-        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords $scrappedDeviceRecords -LogPath $logPath -WhatIf:$WhatIfPreference
+        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords $scrappedDeviceRecords -LogPath $logPath `
+            -WhatIf:$WhatIfPreference -Confirm:$false
 
-        $scrappedSubmittedAutopilot = @($scrappedDeviceRecords | Where-Object { $_.AutopilotRemovalStatus -in 'RemovalSubmitted', 'AlreadyRemoved' -and $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId -Unique).Count
+        $scrappedSubmittedAutopilot = @($scrappedDeviceRecords | Where-Object { $_.AutopilotRemovalStatus -eq 'RemovalSubmitted' -and $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId -Unique).Count
+        $scrappedAlreadyRemovedAutopilot = @($scrappedDeviceRecords | Where-Object { $_.AutopilotRemovalStatus -eq 'AlreadyRemoved' -and $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId -Unique).Count
+        $scrappedFailedAutopilot = @($scrappedDeviceRecords | Where-Object { $_.AutopilotRemovalStatus -eq 'RemovalFailed' -and $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId -Unique).Count
         $scrappedRemovedIntune = @($scrappedDeviceRecords | Where-Object { $_.IntuneRemovalStatus -eq 'Removed' -and $_.IntuneManagedDeviceId } | Select-Object -ExpandProperty IntuneManagedDeviceId -Unique).Count
+        $scrappedAlreadyRemovedIntune = @($scrappedDeviceRecords | Where-Object { $_.IntuneRemovalStatus -eq 'AlreadyRemoved' -and $_.IntuneManagedDeviceId } | Select-Object -ExpandProperty IntuneManagedDeviceId -Unique).Count
+        $scrappedFailedIntune = @($scrappedDeviceRecords | Where-Object { $_.IntuneRemovalStatus -eq 'RemovalFailed' -and $_.IntuneManagedDeviceId } | Select-Object -ExpandProperty IntuneManagedDeviceId -Unique).Count
         $scrappedRemovedEntra = @($scrappedDeviceRecords | Where-Object { $_.EntraRemovalStatus -eq 'Removed' -and $_.EntraObjectId } | Select-Object -ExpandProperty EntraObjectId -Unique).Count
-        Write-CleanupLog -Message "Scrapped device removals completed: Autopilot submissions accepted=$scrappedSubmittedAutopilot; Intune removed=$scrappedRemovedIntune; Entra removed=$scrappedRemovedEntra." -Level INFO -LogPath $logPath
+        $scrappedAlreadyRemovedEntra = @($scrappedDeviceRecords | Where-Object { $_.EntraRemovalStatus -eq 'AlreadyRemoved' -and $_.EntraObjectId } | Select-Object -ExpandProperty EntraObjectId -Unique).Count
+        $scrappedFailedEntra = @($scrappedDeviceRecords | Where-Object { $_.EntraRemovalStatus -eq 'RemovalFailed' -and $_.EntraObjectId } | Select-Object -ExpandProperty EntraObjectId -Unique).Count
+        $scrappedBlockedEntra = @($scrappedDeviceRecords | Where-Object { $_.EntraRemovalStatus -eq 'SkippedAutopilotSubmissionFailed' -and $_.EntraObjectId } | Select-Object -ExpandProperty EntraObjectId -Unique).Count
+        Write-CleanupLog -Message "Scrapped device removals completed: Autopilot accepted=$scrappedSubmittedAutopilot, already absent=$scrappedAlreadyRemovedAutopilot, failed=$scrappedFailedAutopilot; Intune removed=$scrappedRemovedIntune, already absent=$scrappedAlreadyRemovedIntune, failed=$scrappedFailedIntune; Entra removed=$scrappedRemovedEntra, already absent=$scrappedAlreadyRemovedEntra, failed=$scrappedFailedEntra, blocked by Autopilot=$scrappedBlockedEntra." -Level INFO -LogPath $logPath
         Export-ReportCsv -InputObject $scrappedDeviceRecords -Path (Join-Path $resolvedOutputPath 'ScrappedDeviceResults.csv')
         if (@($scrappedDeviceRecords | Where-Object { $_.ErrorMessage }).Count -gt 0 -and $exitCode -eq 0) { $exitCode = 6 }
         return

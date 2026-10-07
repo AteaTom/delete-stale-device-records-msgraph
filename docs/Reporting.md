@@ -60,20 +60,28 @@ does not inspect or modify source Active Directory.
 `IntuneManagedDeviceId`, `IntuneDeviceName`, `EntraObjectId`,
 `EntraDeviceName`, and per-target `AutopilotRemovalStatus`,
 `IntuneRemovalStatus`, `EntraRemovalStatus`. Scrapped-device Autopilot states
-include `RemovalSubmitted`, `RemovalFailed`, `WhatIf`, and `NotApplicable`.
-Related object states include `Removed`, `RemovalFailed`,
-`SkippedAutopilotSubmissionFailed`, `DuplicateSkipped`, `WhatIf`, `Skipped`,
-`NotApplicable`, and `NotAttempted`.
+include `RemovalSubmitted`, `AlreadyRemoved`, `RemovalFailed`, `WhatIf`, and
+`NotApplicable`. Intune and Entra states include `Removed`, `AlreadyRemoved`,
+`RemovalFailed`, `SkippedAutopilotSubmissionFailed`, `DuplicateSkipped`,
+`WhatIf`, `Skipped`, `NotApplicable`, and `NotAttempted`. `AlreadyRemoved`
+means Graph reported that the object was already absent; it is a successful
+terminal outcome, counted separately from a new removal.
 
 `RemovalSubmitted` means the supported Autopilot identity DELETE succeeded.
 It confirms submission, not immediate disappearance from the Autopilot portal;
 the service completes that work asynchronously.
 
 For scrapped-device runs, the completion log and `RunSummary.json` count
-Autopilot, Intune, and Entra outcomes by unique nonempty object ID, not by
-expanded CSV row. The summary also includes unique input, matched, ambiguous,
-not-found, and error serial counts. This prevents one serial expanded across
-multiple object rows from inflating completion totals.
+Autopilot submissions, already-absent and failed objects, Intune removals,
+and Entra removals or Autopilot-blocked objects by unique nonempty object ID,
+not by expanded CSV row. The summary also includes unique input, matched,
+ambiguous, not-found, and error serial counts. This prevents one serial
+expanded across multiple object rows from inflating completion totals.
+
+Collection processing sends one supported Graph request per unique target;
+the workflow does not use Microsoft Graph JSON batching. Each request uses
+the existing retry policy for transient failures, and a failed target is
+reported individually while processing continues for unrelated targets.
 
 When a serial exists in Autopilot, the script expands the serial to include
 all related Entra and Intune objects for that same serial, so the report is the
