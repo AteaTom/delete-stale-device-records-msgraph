@@ -1054,8 +1054,15 @@ function New-RunSummary {
     $scrappedAmbiguousSerials = @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'Ambiguous' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique)
     $scrappedNotFoundSerials = @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'NotFound' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique)
     $scrappedSubmittedAutopilot = @($ScrappedDeviceRecords | Where-Object { $_.AutopilotRemovalStatus -eq 'RemovalSubmitted' -and $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId -Unique)
+    $scrappedAlreadyRemovedAutopilot = @($ScrappedDeviceRecords | Where-Object { $_.AutopilotRemovalStatus -eq 'AlreadyRemoved' -and $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId -Unique)
+    $scrappedFailedAutopilot = @($ScrappedDeviceRecords | Where-Object { $_.AutopilotRemovalStatus -eq 'RemovalFailed' -and $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId -Unique)
     $scrappedRemovedIntune = @($ScrappedDeviceRecords | Where-Object { $_.IntuneRemovalStatus -eq 'Removed' -and $_.IntuneManagedDeviceId } | Select-Object -ExpandProperty IntuneManagedDeviceId -Unique)
+    $scrappedAlreadyRemovedIntune = @($ScrappedDeviceRecords | Where-Object { $_.IntuneRemovalStatus -eq 'AlreadyRemoved' -and $_.IntuneManagedDeviceId } | Select-Object -ExpandProperty IntuneManagedDeviceId -Unique)
+    $scrappedFailedIntune = @($ScrappedDeviceRecords | Where-Object { $_.IntuneRemovalStatus -eq 'RemovalFailed' -and $_.IntuneManagedDeviceId } | Select-Object -ExpandProperty IntuneManagedDeviceId -Unique)
     $scrappedRemovedEntra = @($ScrappedDeviceRecords | Where-Object { $_.EntraRemovalStatus -eq 'Removed' -and $_.EntraObjectId } | Select-Object -ExpandProperty EntraObjectId -Unique)
+    $scrappedAlreadyRemovedEntra = @($ScrappedDeviceRecords | Where-Object { $_.EntraRemovalStatus -eq 'AlreadyRemoved' -and $_.EntraObjectId } | Select-Object -ExpandProperty EntraObjectId -Unique)
+    $scrappedFailedEntra = @($ScrappedDeviceRecords | Where-Object { $_.EntraRemovalStatus -eq 'RemovalFailed' -and $_.EntraObjectId } | Select-Object -ExpandProperty EntraObjectId -Unique)
+    $scrappedBlockedEntra = @($ScrappedDeviceRecords | Where-Object { $_.EntraRemovalStatus -eq 'SkippedAutopilotSubmissionFailed' -and $_.EntraObjectId } | Select-Object -ExpandProperty EntraObjectId -Unique)
     $scrappedErrorSerials = @($ScrappedDeviceRecords | Where-Object { $_.ErrorMessage -and $_.NormalizedSerialNumber } | Select-Object -ExpandProperty NormalizedSerialNumber -Unique)
 
     return [PSCustomObject][ordered]@{
@@ -1086,8 +1093,15 @@ function New-RunSummary {
         TotalScrappedExcludedSerials = @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'Excluded' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique).Count
         TotalScrappedEntraReview = @($ScrappedDeviceRecords | Where-Object EntraObjectId | Select-Object -ExpandProperty EntraObjectId -Unique).Count
         TotalScrappedAutopilotRemovalSubmitted = $scrappedSubmittedAutopilot.Count
+        TotalScrappedAutopilotAlreadyRemoved = $scrappedAlreadyRemovedAutopilot.Count
+        TotalScrappedAutopilotRemovalFailed = $scrappedFailedAutopilot.Count
         TotalScrappedIntuneDevicesRemoved = $scrappedRemovedIntune.Count
+        TotalScrappedIntuneDevicesAlreadyRemoved = $scrappedAlreadyRemovedIntune.Count
+        TotalScrappedIntuneDevicesFailed = $scrappedFailedIntune.Count
         TotalScrappedEntraDevicesRemoved = $scrappedRemovedEntra.Count
+        TotalScrappedEntraDevicesAlreadyRemoved = $scrappedAlreadyRemovedEntra.Count
+        TotalScrappedEntraDevicesFailed = $scrappedFailedEntra.Count
+        TotalScrappedEntraDevicesBlockedByAutopilot = $scrappedBlockedEntra.Count
         TotalScrappedErrors       = $scrappedErrorSerials.Count
         TotalErrors               = $errors.Count + $scrappedErrorSerials.Count
         ConfirmationGranted       = $ConfirmationGranted
@@ -1463,7 +1477,7 @@ function Submit-WindowsAutopilotIdentityRemoval {
     $seenIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $results = [System.Collections.Generic.List[object]]::new()
     foreach ($target in $Targets) {
-        if (-not $target.IdentityId -or -not $seenIds.Add([string]$target.IdentityId)) { continue }
+        if ([string]::IsNullOrWhiteSpace([string]$target.IdentityId) -or -not $seenIds.Add([string]$target.IdentityId)) { continue }
         $status = 'RemovalFailed'
         $errorMessage = $null
         if ($PSCmdlet.ShouldProcess($target.IdentityId, 'Remove Windows Autopilot device identity')) {
@@ -1506,7 +1520,9 @@ function Remove-EntraDeviceRecord {
     [OutputType([bool])]
     param(
         [Parameter(Mandatory)][string]$EntraObjectId,
-        [string]$LogPath
+        [string]$LogPath,
+        [ref]$AlreadyRemoved,
+        [switch]$SuppressErrorLog
     )
 
     if ($PSCmdlet.ShouldProcess($EntraObjectId, 'Remove Microsoft Entra ID device object')) {
@@ -1519,13 +1535,14 @@ function Remove-EntraDeviceRecord {
             $statusCode = if ($_.Exception.PSObject.Properties.Name -contains 'ResponseStatusCode') { $_.Exception.ResponseStatusCode } else { $null }
             $errorMessage = Get-GraphErrorMessage -ErrorRecord $_
             if ($statusCode -eq 404 -or $errorMessage -match 'Request_ResourceNotFound') {
+                if ($AlreadyRemoved) { $AlreadyRemoved.Value = $true }
                 if ($LogPath) {
                     Write-CleanupLog -Message "Entra device object '$EntraObjectId' was already absent; treating removal as complete." -Level INFO -LogPath $LogPath
                 }
                 return $true
             }
 
-            if ($LogPath) {
+            if ($LogPath -and -not $SuppressErrorLog) {
                 Write-CleanupLog -Message "Graph operation 'Remove-MgDevice' failed: $errorMessage" -Level ERROR -LogPath $LogPath
             }
             throw
@@ -1547,16 +1564,109 @@ function Remove-IntuneManagedDeviceRecord {
     [OutputType([bool])]
     param(
         [Parameter(Mandatory)][string]$ManagedDeviceId,
-        [string]$LogPath
+        [string]$LogPath,
+        [ref]$AlreadyRemoved,
+        [switch]$SuppressErrorLog
     )
 
     if ($PSCmdlet.ShouldProcess($ManagedDeviceId, 'Remove Intune managed device')) {
-        Invoke-GraphWithRetry -OperationName 'Remove-MgDeviceManagementManagedDevice' -LogPath $LogPath -ScriptBlock {
-            Remove-MgDeviceManagementManagedDevice -ManagedDeviceId $ManagedDeviceId -ErrorAction Stop
+        try {
+            Invoke-GraphWithRetry -OperationName 'Remove-MgDeviceManagementManagedDevice' -LogPath $LogPath -SuppressErrorLog -ScriptBlock {
+                Remove-MgDeviceManagementManagedDevice -ManagedDeviceId $ManagedDeviceId -ErrorAction Stop
+            }
+        } catch {
+            $statusCode = if ($_.Exception.PSObject.Properties.Name -contains 'ResponseStatusCode') { $_.Exception.ResponseStatusCode } else { $null }
+            $errorMessage = Get-GraphErrorMessage -ErrorRecord $_
+            if ($statusCode -eq 404 -or $errorMessage -match 'Request_ResourceNotFound|ZtdDeviceAlreadyDeleted|already been deleted') {
+                if ($AlreadyRemoved) { $AlreadyRemoved.Value = $true }
+                if ($LogPath) {
+                    Write-CleanupLog -Message "Intune managed device '$ManagedDeviceId' was already absent; treating removal as complete." -Level INFO -LogPath $LogPath
+                }
+                return $true
+            }
+            if ($LogPath -and -not $SuppressErrorLog) {
+                Write-CleanupLog -Message "Graph operation 'Remove-MgDeviceManagementManagedDevice' failed: $errorMessage" -Level ERROR -LogPath $LogPath
+            }
+            throw
         }
         return $true
     }
     return $false
+}
+
+function Invoke-ScrappedDeviceBatchRemoval {
+    <#
+        .SYNOPSIS
+        Processes each unique matched Intune target once using
+        individual retry-enabled Graph requests and records per-target results.
+        This is collection processing, not Microsoft Graph JSON batching.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$ScrappedDeviceRecords,
+        [Parameter(Mandatory)][ValidateSet('Intune')][string]$TargetType,
+        [string]$ExpectedTenantId,
+        [string]$LogPath
+    )
+
+    $targetConfiguration = @{ IdProperty = 'IntuneManagedDeviceId'; StatusProperty = 'IntuneRemovalStatus' }
+    $targetStates = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $matchedRecords = @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'Matched')
+
+    foreach ($record in $matchedRecords) {
+        $idProperty = $record.PSObject.Properties[$targetConfiguration.IdProperty]
+        $statusProperty = $record.PSObject.Properties[$targetConfiguration.StatusProperty]
+        $targetId = if ($idProperty) { [string]$idProperty.Value } else { '' }
+        if ([string]::IsNullOrWhiteSpace($targetId)) {
+            if ($statusProperty) { $statusProperty.Value = 'NotApplicable' }
+            continue
+        }
+
+        if ($targetStates.ContainsKey($targetId)) {
+            $statusProperty.Value = $targetStates[$targetId].Status
+            $record.ErrorMessage = $targetStates[$targetId].ErrorMessage
+            continue
+        }
+
+        $action = 'Remove Intune managed device'
+        if (-not $PSCmdlet.ShouldProcess($targetId, $action)) {
+            $statusProperty.Value = if ($WhatIfPreference) { 'WhatIf' } else { 'Skipped' }
+            $targetStates[$targetId] = [PSCustomObject]@{ Status = $statusProperty.Value; ErrorMessage = $record.ErrorMessage }
+            continue
+        }
+
+        $alreadyRemoved = $false
+        try {
+            if ($ExpectedTenantId) {
+                Assert-DeviceCleanupContext -TenantId $ExpectedTenantId -RequiredScopes @('DeviceManagementManagedDevices.ReadWrite.All')
+            }
+            $removed = Remove-IntuneManagedDeviceRecord -ManagedDeviceId $targetId -LogPath $LogPath `
+                -AlreadyRemoved ([ref]$alreadyRemoved) -SuppressErrorLog -Confirm:$false
+
+            if ($removed -and $alreadyRemoved) {
+                $statusProperty.Value = 'AlreadyRemoved'
+            } elseif ($removed) {
+                $statusProperty.Value = 'Removed'
+                if ($LogPath) {
+                    Write-CleanupLog -Message "Removed $TargetType device record '$targetId' for scrapped device serial '$($record.InputSerialNumber)'." -Level SUCCESS -LogPath $LogPath
+                }
+            } else {
+                $statusProperty.Value = 'Skipped'
+            }
+        } catch {
+            $statusProperty.Value = 'RemovalFailed'
+            $errorMessage = Get-GraphErrorMessage -ErrorRecord $_
+            if ($record.ErrorMessage) {
+                if ($record.ErrorMessage -notlike "*$errorMessage*") { $record.ErrorMessage = "$($record.ErrorMessage) | $errorMessage" }
+            } else {
+                $record.ErrorMessage = $errorMessage
+            }
+            if ($LogPath) {
+                Write-CleanupLog -Message "Failed to remove $TargetType device record '$targetId' for scrapped device serial '$($record.InputSerialNumber)': $errorMessage" -Level ERROR -LogPath $LogPath
+            }
+        }
+        $targetStates[$targetId] = [PSCustomObject]@{ Status = $statusProperty.Value; ErrorMessage = $record.ErrorMessage }
+    }
 }
 
 function Invoke-ScrappedDeviceRemoval {
@@ -1574,44 +1684,31 @@ function Invoke-ScrappedDeviceRemoval {
     )
 
     $matchedRecords = @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'Matched')
-    $intuneStates = @{}
-    $loggedAutopilotErrorSerials = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($record in $matchedRecords) {
-        if (-not $record.IntuneManagedDeviceId) {
-            $record.IntuneRemovalStatus = 'NotApplicable'
-            continue
+    if ($matchedRecords.Count -eq 0) { return }
+    $targetCounts = [ordered]@{
+        Autopilot = @($matchedRecords | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.AutopilotIdentityId) } | Select-Object -ExpandProperty AutopilotIdentityId -Unique).Count
+        Intune    = @($matchedRecords | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.IntuneManagedDeviceId) } | Select-Object -ExpandProperty IntuneManagedDeviceId -Unique).Count
+        Entra     = @($matchedRecords | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.EntraObjectId) } | Select-Object -ExpandProperty EntraObjectId -Unique).Count
+    }
+    $shouldProcess = $PSCmdlet.ShouldProcess(
+        "Autopilot=$($targetCounts.Autopilot), Intune=$($targetCounts.Intune) unique target(s); Entra=$($targetCounts.Entra) retained for review",
+        'Deregister eligible scrapped Intune and Autopilot device records'
+    )
+    if (-not $shouldProcess -and -not $WhatIfPreference) {
+        foreach ($record in $matchedRecords) {
+            if ($record.IntuneManagedDeviceId) { $record.IntuneRemovalStatus = 'Declined' }
+            if ($record.AutopilotIdentityId) { $record.AutopilotRemovalStatus = 'Declined' }
+            $record.EntraRemovalStatus = if ($record.EntraObjectId) { 'ManualReview' } else { 'NotApplicable' }
         }
-        if ($intuneStates.ContainsKey([string]$record.IntuneManagedDeviceId)) {
-            $record.IntuneRemovalStatus = $intuneStates[[string]$record.IntuneManagedDeviceId].Status
-            $record.ErrorMessage = $intuneStates[[string]$record.IntuneManagedDeviceId].ErrorMessage
-            continue
-        }
-
-        try {
-            if ($ExpectedTenantId) {
-                Assert-DeviceCleanupContext -TenantId $ExpectedTenantId -RequiredScopes @('DeviceManagementManagedDevices.ReadWrite.All')
-            }
-            $intuneRemoved = Remove-IntuneManagedDeviceRecord -ManagedDeviceId $record.IntuneManagedDeviceId -LogPath $LogPath -WhatIf:$WhatIfPreference -Confirm:$false
-            if ($WhatIfPreference) {
-                $record.IntuneRemovalStatus = 'WhatIf'
-            } elseif ($intuneRemoved) {
-                $record.IntuneRemovalStatus = 'Removed'
-                Write-CleanupLog -Message "Removed Intune managed device '$($record.IntuneManagedDeviceId)' for scrapped device serial '$($record.InputSerialNumber)'." -Level SUCCESS -LogPath $LogPath
-            } else {
-                $record.IntuneRemovalStatus = 'Skipped'
-            }
-        } catch {
-            $record.IntuneRemovalStatus = 'RemovalFailed'
-            $record.ErrorMessage = $_.Exception.Message
-            Write-CleanupLog -Message "Failed to remove Intune managed device '$($record.IntuneManagedDeviceId)' for scrapped device serial '$($record.InputSerialNumber)': $($_.Exception.Message)" -Level ERROR -LogPath $LogPath
-        }
-        $intuneStates[[string]$record.IntuneManagedDeviceId] = @{
-            Status = $record.IntuneRemovalStatus; ErrorMessage = $record.ErrorMessage
-        }
+        return
     }
 
+    $loggedAutopilotErrorSerials = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    Invoke-ScrappedDeviceBatchRemoval -ScrappedDeviceRecords $matchedRecords -TargetType Intune `
+        -ExpectedTenantId $ExpectedTenantId -LogPath $LogPath -WhatIf:$WhatIfPreference -Confirm:$false
+
     $blockedSerials = @($matchedRecords | Where-Object {
-        $_.IntuneManagedDeviceId -and $_.IntuneRemovalStatus -ne 'Removed' -and
+        $_.IntuneManagedDeviceId -and $_.IntuneRemovalStatus -notin 'Removed', 'AlreadyRemoved' -and
         -not ($WhatIfPreference -and $_.IntuneRemovalStatus -eq 'WhatIf')
     } | Select-Object -ExpandProperty NormalizedSerialNumber -Unique)
     $autopilotTargets = @($matchedRecords | Where-Object {
@@ -1626,13 +1723,18 @@ function Invoke-ScrappedDeviceRemoval {
     }
 
     foreach ($record in $matchedRecords) {
-        if (-not $record.AutopilotIdentityId) {
+        if ([string]::IsNullOrWhiteSpace([string]$record.AutopilotIdentityId)) {
             $record.AutopilotRemovalStatus = 'NotApplicable'
             continue
         }
         if ($record.NormalizedSerialNumber -in $blockedSerials) {
             $record.AutopilotRemovalStatus = 'BlockedDependency'
-            $record.ErrorMessage = 'Required Intune removal did not succeed.'
+            $blockedMessage = 'Autopilot removal was blocked because required Intune removal did not succeed.'
+            if ($record.ErrorMessage) {
+                if ($record.ErrorMessage -notlike "*$blockedMessage*") { $record.ErrorMessage = "$($record.ErrorMessage) | $blockedMessage" }
+            } else {
+                $record.ErrorMessage = $blockedMessage
+            }
             continue
         }
 
@@ -1643,12 +1745,19 @@ function Invoke-ScrappedDeviceRemoval {
 
         $identityState = if ($identityStates.ContainsKey([string]$record.AutopilotIdentityId)) { $identityStates[[string]$record.AutopilotIdentityId] } else { $null }
         if ($identityState -and $identityState.Status -in 'RemovalSubmitted', 'AlreadyRemoved', 'WhatIf') {
-            $record.AutopilotRemovalStatus = 'RemovalSubmitted'
+            $record.AutopilotRemovalStatus = $identityState.Status
         } else {
             $record.AutopilotRemovalStatus = 'RemovalFailed'
-            $record.ErrorMessage = if ($identityState -and $identityState.ErrorMessage) { $identityState.ErrorMessage } else { 'Autopilot identity removal was not submitted.' }
+            $autopilotError = if ($identityState -and $identityState.ErrorMessage) { $identityState.ErrorMessage } else { 'Autopilot identity removal was not submitted.' }
+            if ($record.ErrorMessage) {
+                if ($record.ErrorMessage -notlike "*$autopilotError*") { $record.ErrorMessage = "$($record.ErrorMessage) | $autopilotError" }
+            } else {
+                $record.ErrorMessage = $autopilotError
+            }
             if ($loggedAutopilotErrorSerials.Add([string]$record.NormalizedSerialNumber)) {
-                Write-CleanupLog -Message "Autopilot bulk removal was not accepted for serial '$($record.InputSerialNumber)': $($record.ErrorMessage)" -Level ERROR -LogPath $LogPath
+                if ($LogPath) {
+                    Write-CleanupLog -Message "Autopilot removal was not accepted for serial '$($record.InputSerialNumber)': $($record.ErrorMessage)" -Level ERROR -LogPath $LogPath
+                }
             }
         }
     }
@@ -1740,6 +1849,7 @@ Export-ModuleMember -Function @(
     'Submit-WindowsAutopilotIdentityRemoval',
     'Remove-EntraDeviceRecord',
     'Remove-IntuneManagedDeviceRecord',
+    'Invoke-ScrappedDeviceBatchRemoval',
     'Invoke-ScrappedDeviceRemoval',
     'Initialize-ProjectExecution',
     'Complete-ProjectExecution'

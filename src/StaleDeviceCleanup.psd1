@@ -39,13 +39,14 @@
         'Submit-WindowsAutopilotIdentityRemoval',
         'Remove-EntraDeviceRecord',
         'Remove-IntuneManagedDeviceRecord',
+        'Invoke-ScrappedDeviceBatchRemoval',
         'Invoke-ScrappedDeviceRemoval',
         'Initialize-ProjectExecution',
-        'Complete-ProjectExecution'
-        'New-DeviceDeletionPlan'
-        'Invoke-DeviceDeletionPlan'
-        'Set-DeviceDeletionResults'
-        'Test-DeviceDeletionOutcome'
+        'Complete-ProjectExecution',
+        'New-DeviceDeletionPlan',
+        'Invoke-DeviceDeletionPlan',
+        'Set-DeviceDeletionResults',
+        'Test-DeviceDeletionOutcome',
         'Assert-DeviceCleanupContext'
     )
     CmdletsToExport   = @()

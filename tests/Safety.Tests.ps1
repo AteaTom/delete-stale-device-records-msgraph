@@ -51,6 +51,8 @@ Describe 'Parameter validation' {
         $scriptContent | Should -Match "getScrappedSerialsCommand\.Parameters\.ContainsKey\('Statistics'\)"
         $scriptContent | Should -Match "showScrappedSummaryCommand\.Parameters\.ContainsKey\('CsvDuplicateCount'\)"
         $scriptContent | Should -Match "Get-Command -Name 'Submit-WindowsAutopilotIdentityRemoval'.*ErrorAction SilentlyContinue"
+        $scriptContent | Should -Match "Get-Command -Name 'Invoke-ScrappedDeviceBatchRemoval'.*ErrorAction SilentlyContinue"
+        $scriptContent | Should -Match "Get-Command -Name 'Invoke-DeviceDeletionPlan'.*ErrorAction SilentlyContinue"
     }
 }
 
@@ -410,12 +412,56 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
         }
         $runFolder = Get-ChildItem -Path $script:runOutputPath -Directory | Select-Object -First 1
         $executionLog = Get-Content -LiteralPath (Join-Path $runFolder.FullName 'ExecutionLog.txt') -Raw
-        $executionLog | Should -Match 'Scrapped device removals completed: Autopilot submissions accepted=1; Intune removed=1; Entra removed=0\.'
+        $executionLog | Should -Match 'Scrapped device removals completed: Autopilot accepted=1, already absent=0, failed=0; Intune removed=1, already absent=0, failed=0; Entra removed=0, already absent=0, failed=0, blocked by Autopilot=0\.'
         $runSummary = Get-Content -LiteralPath (Join-Path $runFolder.FullName 'RunSummary.json') -Raw | ConvertFrom-Json
         $runSummary.TotalScrappedAutopilotRemovalSubmitted | Should -Be 1
         $runSummary.TotalScrappedIntuneDevicesRemoved | Should -Be 1
         $runSummary.TotalScrappedEntraDevicesRemoved | Should -Be 0
         $runSummary.TotalErrors | Should -Be 0
+
+        Remove-Item -Path $scrappedPath -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'continues after an individual removal failure and exits with code 6' {
+        $scrappedPath = Join-Path ([System.IO.Path]::GetTempPath()) "scrapped-partial-$(New-Guid).csv"
+        Set-Content -LiteralPath $scrappedPath -Value @('SERIAL-FAIL', 'SERIAL-SUCCEED')
+
+        Mock -CommandName Get-MgContext -ModuleName StaleDeviceCleanup -MockWith {
+            [PSCustomObject]@{
+                TenantId = 'tenant1'
+                AuthType = 'Delegated'
+                Scopes = @(
+                    'Device.Read.All',
+                    'DeviceManagementManagedDevices.Read.All',
+                    'DeviceManagementServiceConfig.Read.All',
+                    'Device.ReadWrite.All',
+                    'DeviceManagementManagedDevices.ReadWrite.All',
+                    'DeviceManagementServiceConfig.ReadWrite.All'
+                )
+            }
+        }
+        Mock -CommandName Get-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -MockWith {
+            @(
+                [PSCustomObject]@{ Id = 'intune-fail'; AzureAdDeviceId = $null; SerialNumber = 'SERIAL-FAIL'; DeviceName = 'SCRAPPED-FAIL'; OperatingSystem = 'Windows' },
+                [PSCustomObject]@{ Id = 'intune-succeed'; AzureAdDeviceId = $null; SerialNumber = 'SERIAL-SUCCEED'; DeviceName = 'SCRAPPED-SUCCEED'; OperatingSystem = 'Windows' }
+            )
+        }
+        Mock -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -MockWith {
+            if ($ManagedDeviceId -eq 'intune-fail') { throw [System.Exception]::new('403 Forbidden') }
+        }
+
+        & $script:scriptPath -Mode Automatic -DaysInactive 180 -OutputPath $script:runOutputPath `
+            -ConfirmDeletion -ScrappedDeviceCsvPath $scrappedPath
+
+        Assert-MockCalled -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 2
+        $runFolder = Get-ChildItem -Path $script:runOutputPath -Directory | Select-Object -First 1
+        $results = @(Import-Csv -LiteralPath (Join-Path $runFolder.FullName 'ScrappedDeviceResults.csv'))
+        ($results | Where-Object InputSerialNumber -eq 'SERIAL-FAIL').IntuneRemovalStatus | Should -Be 'RemovalFailed'
+        ($results | Where-Object InputSerialNumber -eq 'SERIAL-SUCCEED').IntuneRemovalStatus | Should -Be 'Removed'
+        $runSummary = Get-Content -LiteralPath (Join-Path $runFolder.FullName 'RunSummary.json') -Raw | ConvertFrom-Json
+        $runSummary.ExitCode | Should -Be 6
+        $runSummary.TotalScrappedIntuneDevicesFailed | Should -Be 1
+        $runSummary.TotalScrappedIntuneDevicesRemoved | Should -Be 1
 
         Remove-Item -Path $scrappedPath -Force -ErrorAction SilentlyContinue
     }
@@ -442,28 +488,29 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
         Mock -CommandName Get-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -MockWith {
             @([PSCustomObject]@{ Id = 'ap1'; AzureActiveDirectoryDeviceId = 'dev1'; ManagedDeviceId = $null; SerialNumber = '5CD3271HSD'; EnrollmentState = 'enrolled' })
         }
-        Mock -CommandName Write-Host -ModuleName StaleDeviceCleanup -ParameterFilter { $Object -eq 'Scrapped-device cleanup summary' } -MockWith {
-            $global:scrappedSummaryShown = $true
+        $global:scrappedSummaryLines = [System.Collections.Generic.List[string]]::new()
+        Mock -CommandName Write-Host -ModuleName StaleDeviceCleanup -MockWith {
+            $global:scrappedSummaryLines.Add([string]$Object)
+            if ($Object -eq 'Scrapped-device cleanup summary') { $global:scrappedSummaryShown = $true }
         }
-        Mock -CommandName Write-Host -ModuleName StaleDeviceCleanup -ParameterFilter { $Object -eq '  Duplicate CSV rows ignored:    1' } -MockWith { }
         Mock -CommandName Read-Host -ModuleName StaleDeviceCleanup -MockWith {
             $global:scrappedSummaryShown | Should -BeTrue
-            Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
-                $Object -eq 'Workflow: Explicit scrapped hardware deregistration; tenant: tenant1'
-            }
-            Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
-                $Object -eq 'Mode: Interactive; WhatIf: False; transport: Individual'
-            }
+            $global:scrappedSummaryLines | Should -Contain 'Workflow: Explicit scrapped hardware deregistration; tenant: tenant1'
+            $global:scrappedSummaryLines | Should -Contain 'Mode: Interactive; WhatIf: False; transport: Individual'
             return ''
         }
 
         & $script:scriptPath -Mode Interactive -DaysInactive 180 -OutputPath $script:runOutputPath -ScrappedDeviceCsvPath $scrappedPath
 
         Assert-MockCalled -CommandName Read-Host -ModuleName StaleDeviceCleanup -Times 1
-        Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Duplicate CSV rows ignored:    1' }
+        $global:scrappedSummaryLines | Should -Contain '  Duplicate CSV rows ignored:    1'
         Assert-MockCalled -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 0
+        $runFolder = Get-ChildItem -Path $script:runOutputPath -Directory | Sort-Object Name -Descending | Select-Object -First 1
+        $runSummary = Get-Content -LiteralPath (Join-Path $runFolder.FullName 'RunSummary.json') -Raw | ConvertFrom-Json
+        $runSummary.ExitCode | Should -Be 5
 
         Remove-Variable -Name scrappedSummaryShown -Scope Global -ErrorAction SilentlyContinue
+        Remove-Variable -Name scrappedSummaryLines -Scope Global -ErrorAction SilentlyContinue
         Remove-Item -Path $scrappedPath -Force -ErrorAction SilentlyContinue
     }
 }

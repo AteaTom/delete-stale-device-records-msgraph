@@ -236,6 +236,41 @@ run the standard stale-device lifecycle in the same execution. Before
 confirmation, the console shows the exact unique target counts, and
 `ScrappedDeviceResults.csv` contains the object-level details.
 
+### Calling the reusable Intune batch-removal helper
+
+The helper accepts already-matched record objects and processes each unique
+Intune managed-device ID once using individual retry-enabled Graph requests.
+This is collection processing, not Microsoft Graph JSON batching. `-WhatIf`
+shows the intended action without sending a Graph DELETE:
+
+```powershell
+Import-Module .\src\StaleDeviceCleanup.psd1
+
+$records = @(
+    [PSCustomObject]@{
+        MatchStatus            = 'Matched'
+        InputSerialNumber      = 'SCRAP-001'
+        IntuneManagedDeviceId  = 'synthetic-intune-id'
+        IntuneRemovalStatus    = 'NotAttempted'
+        ErrorMessage           = $null
+    }
+)
+
+Invoke-ScrappedDeviceBatchRemoval `
+    -ScrappedDeviceRecords $records `
+    -TargetType Intune `
+    -WhatIf `
+    -Confirm:$false
+
+$records | Select-Object InputSerialNumber, IntuneManagedDeviceId, IntuneRemovalStatus
+```
+
+The record's status becomes `WhatIf`; non-`Matched` records and records without
+an Intune ID are not removed. For normal tenant cleanup, prefer the
+`-ScrappedDeviceCsvPath` script workflow above: it performs discovery,
+validation, confirmation, dependency ordering, and reporting. Entra objects
+remain available for manual review and are not removed by this workflow.
+
 Microsoft reference: [Windows Autopilot deregistration guidance](https://learn.microsoft.com/autopilot/registration-overview#deregister-a-device)
 
 ## Protected-device configuration

@@ -95,8 +95,9 @@ does not inspect or modify source Active Directory.
 `IntuneManagedDeviceId`, `IntuneDeviceName`, `EntraObjectId`,
 `EntraDeviceName`, and per-target `AutopilotRemovalStatus`,
 `IntuneRemovalStatus`, `EntraRemovalStatus`. Scrapped-device Autopilot states
-include `RemovalSubmitted`, `RemovalFailed`, `WhatIf`, and `NotApplicable`.
-Intune states include `Removed`, `RemovalFailed`, `OutcomeUnknown`, `Declined`,
+include `RemovalSubmitted`, `AlreadyRemoved`, `RemovalFailed`, `Declined`,
+`WhatIf`, and `NotApplicable`.
+Intune states include `Removed`, `AlreadyRemoved`, `RemovalFailed`, `OutcomeUnknown`, `Declined`,
 `WhatIf`, `Skipped`, `NotApplicable`, and `NotAttempted`. Autopilot also uses
 `BlockedDependency` when required Intune removal did not succeed.
 Entra objects use `ManualReview`, never `Removed`, in this workflow.
@@ -106,10 +107,16 @@ It confirms submission, not immediate disappearance from the Autopilot portal;
 the service completes that work asynchronously.
 
 For scrapped-device runs, the completion log and `RunSummary.json` count
-Autopilot, Intune, and Entra outcomes by unique nonempty object ID, not by
-expanded CSV row. The summary also includes unique input, matched, ambiguous,
-not-found, and error serial counts. This prevents one serial expanded across
-multiple object rows from inflating completion totals.
+Autopilot submissions, already-absent and failed objects, Intune removals,
+and Entra review objects by unique nonempty object ID, not by expanded CSV row.
+The summary also includes unique input, matched,
+ambiguous, not-found, and error serial counts. This prevents one serial
+expanded across multiple object rows from inflating completion totals.
+
+Collection processing sends one supported Graph request per unique target;
+the workflow does not use Microsoft Graph JSON batching. Each request uses
+the existing retry policy for transient failures, and a failed target is
+reported individually while processing continues for unrelated targets.
 
 Only unambiguous matches are reported as `Matched`; duplicate matches remain
 `Ambiguous` even with Autopilot present. Protection, unsupported/missing
@@ -119,8 +126,9 @@ Only `Matched` rows are ever acted on.
 
 Before mode validation or an interactive deletion prompt, the console summary
 shows unique counts for input and matched serial numbers, the number of
-case-insensitive duplicate CSV rows ignored, exact unique Autopilot/Intune/Entra
-records to remove, Entra objects for review, and ambiguous/excluded/not-found serials. Blank rows and the optional
+case-insensitive duplicate CSV rows ignored, exact unique Intune/Autopilot
+records to remove, Entra objects for review, and ambiguous/excluded/not-found
+serials. Blank rows and the optional
 header are excluded from the duplicate count.
 `ScrappedDeviceResults.csv` is written first so its object-level rows can be
 reviewed before confirmation.

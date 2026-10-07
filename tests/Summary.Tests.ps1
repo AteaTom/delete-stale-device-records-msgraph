@@ -262,10 +262,33 @@ Describe 'New-RunSummary' {
         $summary.TotalScrappedMatchedSerials | Should -Be 2
         $summary.TotalScrappedNotFoundSerials | Should -Be 1
         $summary.TotalScrappedAutopilotRemovalSubmitted | Should -Be 1
+        $summary.TotalScrappedAutopilotRemovalFailed | Should -Be 1
         $summary.TotalScrappedIntuneDevicesRemoved | Should -Be 1
         $summary.TotalScrappedEntraDevicesRemoved | Should -Be 1
+        $summary.TotalScrappedEntraDevicesBlockedByAutopilot | Should -Be 1
         $summary.TotalScrappedErrors | Should -Be 1
         $summary.TotalErrors | Should -Be 1
+    }
+
+    It 'counts accepted and already-absent scrapped targets once by object ID' {
+        $records = @(
+            [PSCustomObject]@{ NormalizedSerialNumber = 'serial1'; MatchStatus = 'Matched'; AutopilotIdentityId = 'ap1'; IntuneManagedDeviceId = 'intune1'; EntraObjectId = 'entra1'; AutopilotRemovalStatus = 'RemovalSubmitted'; IntuneRemovalStatus = 'AlreadyRemoved'; EntraRemovalStatus = 'AlreadyRemoved'; ErrorMessage = $null },
+            [PSCustomObject]@{ NormalizedSerialNumber = 'serial1'; MatchStatus = 'Matched'; AutopilotIdentityId = 'ap1'; IntuneManagedDeviceId = 'intune1'; EntraObjectId = 'entra1'; AutopilotRemovalStatus = 'RemovalSubmitted'; IntuneRemovalStatus = 'AlreadyRemoved'; EntraRemovalStatus = 'AlreadyRemoved'; ErrorMessage = $null },
+            [PSCustomObject]@{ NormalizedSerialNumber = 'serial2'; MatchStatus = 'Matched'; AutopilotIdentityId = 'ap2'; IntuneManagedDeviceId = 'intune2'; EntraObjectId = 'entra2'; AutopilotRemovalStatus = 'AlreadyRemoved'; IntuneRemovalStatus = 'Removed'; EntraRemovalStatus = 'Removed'; ErrorMessage = $null }
+        )
+
+        $summary = New-RunSummary -RunId 'r6' -Mode 'Automatic' -StartTimeUtc (Get-Date).ToUniversalTime() -CutoffDateUtc (Get-Date).ToUniversalTime() -DaysInactive 180 -AllEvaluatedDevices @() -ScrappedDeviceRecords $records
+
+        $summary.TotalScrappedAutopilotRemovalSubmitted | Should -Be 1
+        $summary.TotalScrappedAutopilotAlreadyRemoved | Should -Be 1
+        $summary.TotalScrappedAutopilotRemovalFailed | Should -Be 0
+        $summary.TotalScrappedIntuneDevicesRemoved | Should -Be 1
+        $summary.TotalScrappedIntuneDevicesAlreadyRemoved | Should -Be 1
+        $summary.TotalScrappedIntuneDevicesFailed | Should -Be 0
+        $summary.TotalScrappedEntraDevicesRemoved | Should -Be 1
+        $summary.TotalScrappedEntraDevicesAlreadyRemoved | Should -Be 1
+        $summary.TotalScrappedEntraDevicesFailed | Should -Be 0
+        $summary.TotalScrappedEntraDevicesBlockedByAutopilot | Should -Be 0
     }
 }
 
