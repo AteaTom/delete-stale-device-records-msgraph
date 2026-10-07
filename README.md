@@ -96,6 +96,14 @@ submit the Autopilot identity DELETE → remove the Entra object after success.
 If Autopilot removal fails, Entra removal is blocked. See
 [docs/Architecture.md](docs/Architecture.md).
 
+### Experimental batch-removal migration
+
+See the [batch-removal migration plan](docs/BatchRemovalMigrationPlan.md) for
+the proposed opt-in Autopilot bulk backend, safety gates, test coverage, and
+staged lab/production rollout. This is a proposal only: individual identity
+DELETE remains the current implementation, and no batch-selection parameter
+is available yet.
+
 ## Prerequisites
 
 - PowerShell 7.0 or later.
