@@ -891,7 +891,7 @@ function Show-ScrappedDeviceSummary {
     Write-Host ("  Entra objects to remove:       {0}" -f $entraIds.Count)
     Write-Host ("  Total DELETE operations:       {0}" -f ($intuneIds.Count + $autopilotIds.Count + $entraIds.Count))
     Write-Host 'Order: Intune, Autopilot, Entra; failed dependencies block related targets.'
-    Write-Host 'Entra removal requires verified absence of all related Autopilot identities.'
+    Write-Host 'Entra removal continues after all related Autopilot DELETE requests are accepted.'
     Write-Host ''
     Write-Host 'Excluded from deletion:'
     Write-Host ("  Ambiguous serial numbers:      {0}" -f $ambiguousSerials.Count)
@@ -1765,7 +1765,7 @@ function Invoke-ScrappedDeviceRemoval {
         .SYNOPSIS
         Removes unique Intune records before related Autopilot identities.
         Failed prerequisites block dependent operations. Entra removal requires
-        verified Autopilot absence. Only validated Matched records are used.
+        an accepted Autopilot removal request. Only validated Matched records are used.
     #>
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
     param(
@@ -1856,30 +1856,9 @@ function Invoke-ScrappedDeviceRemoval {
         }
     }
 
-    $verificationStates = @{}
-    foreach ($record in $matchedRecords) {
-        $id = [string]$record.AutopilotIdentityId
-        if (-not $id -or $verificationStates.ContainsKey($id)) { continue }
-        if ($WhatIfPreference) {
-            $verificationStates[$id] = [PSCustomObject]@{ Status = 'NotRequested'; ErrorMessage = '' }
-        } elseif ($record.AutopilotRemovalStatus -in 'RemovalSubmitted', 'AlreadyRemoved') {
-            $verificationStates[$id] = Test-DeviceDeletionOutcome -Operation ([PSCustomObject]@{
-                Id = "autopilot-$id"; Resource = 'Autopilot'; ObjectId = $id
-            }) -TenantId $ExpectedTenantId -LogPath $LogPath
-        } else {
-            $verificationStates[$id] = [PSCustomObject]@{ Status = 'NotRequested'; ErrorMessage = '' }
-        }
-    }
     $entraStates = @{}
     foreach ($record in $matchedRecords) {
-        $apId = [string]$record.AutopilotIdentityId
-        $verification = if ($apId) { $verificationStates[$apId] } else { $null }
-        $record | Add-Member -NotePropertyName AutopilotVerificationStatus -NotePropertyValue $(
-            if ($verification) { $verification.Status } else { 'NotApplicable' }
-        ) -Force
-        if ($verification -and $verification.ErrorMessage) {
-            Add-ScrappedDeviceError -Record $record -Message $verification.ErrorMessage
-        }
+        $record | Add-Member -NotePropertyName AutopilotVerificationStatus -NotePropertyValue 'NotRequested' -Force
         $id = [string]$record.EntraObjectId
         if (-not $id) { $record.EntraRemovalStatus = 'NotApplicable'; continue }
         if ($entraStates.ContainsKey($id)) {
@@ -1892,14 +1871,13 @@ function Invoke-ScrappedDeviceRemoval {
             ($_.IntuneManagedDeviceId -and $_.IntuneRemovalStatus -notin 'Removed', 'AlreadyRemoved' -and
                 -not ($WhatIfPreference -and $_.IntuneRemovalStatus -eq 'WhatIf')) -or
             ($_.AutopilotIdentityId -and -not ($WhatIfPreference -and $_.AutopilotRemovalStatus -eq 'WhatIf') -and
-                ($_.AutopilotRemovalStatus -notin 'RemovalSubmitted', 'AlreadyRemoved' -or
-                    $verificationStates[[string]$_.AutopilotIdentityId].Status -ne 'VerifiedAbsent'))
+                $_.AutopilotRemovalStatus -notin 'RemovalSubmitted', 'AlreadyRemoved')
         }).Count -gt 0
         $status = 'NotAttempted'
         $errorMessage = ''
         if ($blocked) {
             $status = 'BlockedDependency'
-            $errorMessage = 'Entra removal blocked: required Intune removal or verified Autopilot absence was not established.'
+            $errorMessage = 'Entra removal blocked: required Intune or Autopilot removal was not accepted.'
             if ($LogPath) { Write-CleanupLog -Message $errorMessage -Level WARNING -LogPath $LogPath }
             else { Write-Warning $errorMessage }
         } elseif (-not $PSCmdlet.ShouldProcess($id, 'Remove Microsoft Entra ID device object')) {
@@ -1953,11 +1931,10 @@ function Set-ScrappedDeviceOutcomes {
                     if (-not $row.($service.Id)) { continue }
                     $status = $row.("$($service.Name)RemovalStatus")
                     $verificationProperty = $row.PSObject.Properties["$($service.Name)VerificationStatus"]
-                    if ($verificationProperty -and $verificationProperty.Value -in 'OutcomeUnknown', 'VerificationPending') {
+                    if ($service.Name -eq 'Autopilot' -and $status -in 'RemovalSubmitted', 'AlreadyRemoved') {
+                        'Removed'
+                    } elseif ($verificationProperty -and $verificationProperty.Value -in 'OutcomeUnknown', 'VerificationPending') {
                         $verificationProperty.Value
-                    } elseif ($service.Name -eq 'Autopilot' -and $status -in 'RemovalSubmitted', 'AlreadyRemoved') {
-                        if ($row.AutopilotVerificationStatus -eq 'VerifiedAbsent') { 'Removed' }
-                        else { 'RemovalSubmitted' }
                     } else { $status }
                 }
             }

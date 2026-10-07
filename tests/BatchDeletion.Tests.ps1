@@ -409,7 +409,7 @@ Describe 'Guarded JSON batch deletion' {
         Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1 -Exactly
     }
 
-    It 'executes all three phases with verified Autopilot absence and simulation parity' {
+    It 'executes all three phases after accepted Autopilot deletion without read-back' {
         $script:invoke.Plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records @(New-ScrappedBatchRecord)
         $script:invoke.ApprovalHash = $script:invoke.Plan.Hash
         $results = @(Invoke-DeviceDeletionPlan @script:invoke)
@@ -417,9 +417,24 @@ Describe 'Guarded JSON batch deletion' {
         ($results | Where-Object Resource -eq 'Autopilot').Status | Should -Be 'RemovalSubmitted'
         ($results | Where-Object Resource -eq 'Entra').Status | Should -Be 'Removed'
         Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 3 -Exactly -ParameterFilter { $Method -eq 'POST' }
-        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1 -Exactly -ParameterFilter { $Method -eq 'GET' }
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0 -ParameterFilter { $Method -eq 'GET' }
         $script:invoke.JournalPath = Join-Path $TestDrive 'simulation.jsonl'
         @(Invoke-DeviceDeletionPlan @script:invoke -WhatIf | Where-Object Status -eq 'WhatIf').Count | Should -Be 3
+    }
+
+    It 'does not let optional Autopilot read-back block Entra deletion' {
+        $script:invoke.Plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records @(New-ScrappedBatchRecord)
+        $script:invoke.ApprovalHash = $script:invoke.Plan.Hash
+        Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -ParameterFilter { $Method -eq 'GET' } {
+            [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::Forbidden)
+        }
+
+        $results = @(Invoke-DeviceDeletionPlan @script:invoke -VerifyDeletion)
+
+        ($results | Where-Object Resource -eq 'Autopilot').Status | Should -Be 'RemovalSubmitted'
+        ($results | Where-Object Resource -eq 'Autopilot').VerificationStatus | Should -Be 'OutcomeUnknown'
+        ($results | Where-Object Resource -eq 'Entra').Status | Should -Be 'Removed'
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 3 -Exactly -ParameterFilter { $Method -eq 'GET' }
     }
 
     It 'isolates a failed Intune prerequisite from an unrelated successful device' {

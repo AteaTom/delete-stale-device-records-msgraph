@@ -13,18 +13,20 @@ All notable changes to this project are documented in this file.
   `-ScrappedDevices`; strict CSV requires a `SerialNumber` header. Optional
   `-AllowLegacyScrappedDeviceFormat` explicitly permits headerless input.
 - Remove safely correlated scrapped Entra objects after Intune removal and
-  verified absence of all related Autopilot identities, in both Individual
-  and JsonBatch. Pending verification or failed prerequisites block dependent
-  operations; independent targets continue. Destructive scrapped runs now
-  require delegated `Directory.AccessAsUser.All` in addition to Intune scopes.
+  successful Autopilot DELETE acceptance, in both Individual and JsonBatch.
+  Failed prerequisites block dependent operations; independent targets
+  continue. Destructive scrapped runs now require delegated
+  `Directory.AccessAsUser.All` in addition to Intune scopes.
+- Autopilot read-back no longer gates Entra deletion after Graph accepts the
+  DELETE; optional JsonBatch `-VerifyDeletion` remains post-operation reporting.
 - Permit multiple records only when stable relationships corroborate one
   physical device; retain protection, platform, synchronization and ambiguity
   gates. Report complete, partial, blocked, pending and simulated outcomes.
 
 ### Added
 
-- Offline parameter-binding, CSV, correlation, all-service, dependency
-  verification and partial-failure regression coverage; synthetic input sample.
+- Offline parameter-binding, CSV, correlation, all-service, dependency and
+  partial-failure regression coverage; synthetic input sample.
 
 ## [1.1.0]
 

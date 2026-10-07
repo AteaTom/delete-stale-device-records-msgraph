@@ -315,9 +315,9 @@ Describe 'Invoke-ScrappedDeviceRemoval' {
         Remove-Variable -Name scrappedRemovalOrder -Scope Script -ErrorAction SilentlyContinue
     }
 
-    It 'handles mandatory verification without an optional log path: <Readback>' -TestCases @(
+    It 'does not require Autopilot read-back before Entra deletion without a log path: <Readback>' -TestCases @(
         @{ Readback = 'NotFound'; EntraStatus = 'Removed' },
-        @{ Readback = 'Forbidden'; EntraStatus = 'BlockedDependency' }
+        @{ Readback = 'Forbidden'; EntraStatus = 'Removed' }
     ) {
         param($Readback, $EntraStatus)
         $script:noLogReadback = [System.Net.HttpStatusCode]::$Readback
@@ -327,8 +327,8 @@ Describe 'Invoke-ScrappedDeviceRemoval' {
         $record = New-TestScrappedRecord
         { Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords @($record) -Confirm:$false } | Should -Not -Throw
         $record.EntraRemovalStatus | Should -Be $EntraStatus
-        if ($Readback -eq 'NotFound') { $record.AutopilotVerificationStatus | Should -Be 'VerifiedAbsent' }
-        else { $record.ErrorMessage | Should -Match 'HTTP 403' }
+        $record.AutopilotVerificationStatus | Should -Be 'NotRequested'
+        Assert-MockCalled Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0
     }
 
     It 'never touches Ambiguous or NotFound records' {
@@ -490,7 +490,7 @@ Describe 'Invoke-ScrappedDeviceRemoval' {
         Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
     }
 
-    It 'preserves already-removed Autopilot outcomes and verifies absence before Entra deletion' {
+    It 'preserves already-removed Autopilot outcomes without requiring read-back before Entra deletion' {
         Mock -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -MockWith {
             throw [System.Exception]::new('ZtdDeviceAlreadyDeleted')
         }
@@ -501,6 +501,20 @@ Describe 'Invoke-ScrappedDeviceRemoval' {
         $record.AutopilotRemovalStatus | Should -Be 'AlreadyRemoved'
         $record.EntraRemovalStatus | Should -Be 'Removed'
         Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 1
+        Assert-MockCalled -CommandName Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0
+    }
+
+    It 'continues to Entra after Autopilot accepts deletion without read-back' {
+        $record = New-TestScrappedRecord -IntuneManagedDeviceId $null
+
+        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords @($record) -LogPath $script:testLogPath -Confirm:$false
+
+        $record.AutopilotRemovalStatus | Should -Be 'RemovalSubmitted'
+        $record.AutopilotVerificationStatus | Should -Be 'NotRequested'
+        $record.EntraRemovalStatus | Should -Be 'Removed'
+        $record.CleanupOutcome | Should -Be 'Complete'
+        Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 1
+        Assert-MockCalled -CommandName Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0
     }
 
     It 'removes every validated Entra object without an Autopilot dependency' {

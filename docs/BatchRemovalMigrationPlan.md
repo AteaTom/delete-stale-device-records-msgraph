@@ -40,7 +40,7 @@ eligibility change, or live tenant execution is authorized by this document.
 | Stale cleanup removes Autopilot before Entra | Autopilot-backed stale objects are protected (`AutopilotProtected`) | Adopt current policy; do not restore activity-driven deregistration |
 | Scrapped CSV bypasses protection/platform rules | Resolver applies protection, client scope, synchronization, stable-ID and ambiguity gates | The former policy discrepancy is addressed in main |
 | Path-only/headerless scrapped commands | Explicit `-ScrappedDevices` parameter set and strict CSV header; legacy format is opt-in | Document the breaking operator migration |
-| Add complete prerequisites and absence verification | Both transports require successful Intune prerequisites and verified absence of all related Autopilot identities before Entra | Mark implemented; validate independently of optional final verification |
+| Add complete prerequisites and Autopilot acceptance | Both transports require successful Intune prerequisites and accepted Autopilot DELETE responses before Entra | Implemented; optional final verification is diagnostic and does not gate dependencies |
 | Add hashed plan, journal and bounded batch recovery | JsonBatch has approval-bound plans, exclusive journals, per-ID responses/retries and final report recovery | Mark implemented for JsonBatch, not for Individual |
 | Original baseline: 102 passing tests, 7 analyzer warnings | Reviewed main: 249 passing tests, 11 existing test-fixture warnings | Replace the old validation baseline |
 
@@ -84,7 +84,7 @@ authorization must be validated separately; scope checks alone cannot prove
 that a DELETE is allowed. See [Permissions.md](Permissions.md).
 
 The scrapped sequence is required Intune removal, Autopilot identity DELETE,
-verified absence of every associated Autopilot identity, then dependent Entra
+accepted removal of every associated Autopilot identity, then dependent Entra
 removal. Failed/declined prerequisites block descendants; safely independent
 targets can continue after isolated failures. Stale cleanup never removes
 Intune or Autopilot records. Autopilot remains Windows-only.
@@ -149,7 +149,7 @@ and no universal conditional-delete or automatic replay guarantee is claimed.
 | 1. Align documentation and baseline | Replace obsolete proposal, link beside existing JSON transport usage, explain strict scrapped migration and current permissions | Documentation matches source; no runtime changes; current offline/analyzer evidence recorded |
 | 2. Establish operational readiness | Preserve regression coverage; review recovery differences, artifact access, report consumers and additional coverage below | No unresolved fail-open behavior; differences documented or assigned separate approved work; no weakened tests |
 | 3. Audit and WhatIf rehearsal | Operator uses explicit tenant, reviewed classification/CSV, protection and fresh discovery; compare target sets without deletion | Audit submits no destructive requests; WhatIf has no submitted IDs/attempts or removed counts; any target-set differences explained |
-| 4. Authorized disposable lab validation | Validate standalone Entra, then separately validate Windows Intune/Autopilot/Entra dependencies; begin with BatchSize 1 and multiple envelopes before boundary-sized runs | Correct routes/roles, stable SDK context and restored MaxRetry; matching exact IDs in plan/journal/reports; verified absence and failure blocks behave correctly |
+| 4. Authorized disposable lab validation | Validate standalone Entra, then separately validate Windows Intune/Autopilot/Entra dependencies; begin with BatchSize 1 and multiple envelopes before boundary-sized runs | Correct routes/roles, stable SDK context and restored MaxRetry; matching exact IDs in plan/journal/reports; accepted DELETE responses and failure blocks behave correctly |
 | 5. Controlled production opt-in | Separately authorized, fully reviewed small cohort with monitored outcomes and recovery evidence | No unapproved target expansion or unresolved unknown outcome; Individual remains default |
 | 6. Future promotion decision | Compare measured call cost, duration and reliability on separate comparable disposable cohorts | Separate owner approval/release for a default change; no claimed speedup from the 20-request limit alone |
 

@@ -315,13 +315,12 @@ function Invoke-DeviceDeletionPlan {
                 $blocked = @($operation.Dependencies | Where-Object {
                     if ($WhatIfPreference -and $results[$_].Status -eq 'WhatIf') { $false }
                     elseif ($byId[$_].Resource -eq 'Autopilot') {
-                        $results[$_].Status -notin 'RemovalSubmitted', 'AlreadyRemoved', 'AlreadyAbsent' -or
-                            $results[$_].VerificationStatus -ne 'VerifiedAbsent'
+                        $results[$_].Status -notin 'RemovalSubmitted', 'AlreadyRemoved', 'AlreadyAbsent'
                     } else { $results[$_].Status -notin 'Removed', 'AlreadyRemoved', 'AlreadyAbsent' }
                 }).Count -gt 0
                 if ($blocked) {
                     $results[$operation.Id].Status = 'BlockedDependency'
-                    $results[$operation.Id].ErrorMessage = 'Required removal or verified Autopilot absence was not established.'
+                    $results[$operation.Id].ErrorMessage = 'Required removal was not accepted.'
                     Write-CleanupLog -Message "Blocked '$($operation.Id)': $($results[$operation.Id].ErrorMessage)" -Level WARNING -LogPath $LogPath
                 } elseif ($PSCmdlet.ShouldProcess("Tenant $($snapshot.TenantId): $phase/$($operation.ObjectId)", 'Delete approved device record')) {
                     $pending.Add($operation)
@@ -413,17 +412,6 @@ function Invoke-DeviceDeletionPlan {
                     }
                 }
                 & $saveJournal 'ChunkCompleted'
-            }
-            if ($snapshot.Workflow -eq 'Scrapped' -and $phase -eq 'Autopilot' -and -not $WhatIfPreference) {
-                foreach ($operation in @($operations | Where-Object Resource -eq 'Autopilot')) {
-                    $result = $results[$operation.Id]
-                    if ($result.Status -eq 'RemovalSubmitted') {
-                        $verification = Test-DeviceDeletionOutcome -Operation $operation -TenantId $snapshot.TenantId -LogPath $LogPath
-                        $result.VerificationStatus = $verification.Status
-                        if ($verification.ErrorMessage) { $result.ErrorMessage = $verification.ErrorMessage }
-                        & $saveJournal 'DependencyVerification'
-                    }
-                }
             }
             & $saveJournal 'PhaseCompleted'
         }
