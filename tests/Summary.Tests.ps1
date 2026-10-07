@@ -136,7 +136,7 @@ Describe 'Export-CleanupReports' {
         $expectedFiles = @(
             'AllEvaluatedDevices.csv', 'DeletionCandidates.csv', 'DeletedDevices.csv',
             'UnknownDevices.csv', 'AmbiguousMatches.csv', 'ExcludedDevices.csv', 'ErrorDevices.csv',
-            'OnPremisesSyncedReview.csv'
+            'OnPremisesSyncedReview.csv', 'ADSyncedDevices.csv', 'AutopilotProtectedDevices.csv'
         )
         foreach ($file in $expectedFiles) {
             Test-Path (Join-Path $script:testOutputPath $file) | Should -Be $true
@@ -176,7 +176,8 @@ Describe 'Export-CleanupReports' {
             -DaysInactive 180 -AllEvaluatedDevices $evaluated
         $json = $summary | ConvertTo-Json
         $jsonCutoff = [regex]::Match($json, '"CutoffDateUtc"\s*:\s*"([^"]+)"').Groups[1].Value
-        foreach ($name in 'AllEvaluatedDevices', 'ExcludedDevices', 'OnPremisesSyncedReview') {
+        @(Import-Csv (Join-Path $script:testOutputPath 'ExcludedDevices.csv')).Count | Should -Be 1
+        foreach ($name in 'AllEvaluatedDevices', 'ADSyncedDevices', 'OnPremisesSyncedReview') {
             $row = @(Import-Csv (Join-Path $script:testOutputPath "$name.csv") |
                 Where-Object EntraObjectId -eq 'stale-sync')[0]
             $row.CutoffDateUtc | Should -BeExactly $jsonCutoff

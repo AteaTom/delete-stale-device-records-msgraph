@@ -1,5 +1,26 @@
 # Troubleshooting
 
+## Finding exclusions and failed actions
+
+Use `ADSyncedDevices.csv` and `AutopilotProtectedDevices.csv` for the two
+dedicated protection categories. They no longer appear in `ExcludedDevices.csv`;
+the complete record remains in `AllEvaluatedDevices.csv`. A device associated
+with both follows the existing primary reason (Autopilot before AD-sync).
+`OnPremisesSyncedReview.csv` is a compatibility alias, not another category.
+
+Use `ActionResults.csv` for unique planned operations, including their final
+outcomes, attempts, HTTP statuses and verification state. Terminal failures,
+unknown outcomes and blocked dependencies produce `Event=ActionAttention`
+warnings in `ExecutionLog.txt`. The final console/log block and
+`RunSummary.json` use the same counts; neither simulated nor already-absent
+objects count as newly removed. `RunErrors` can be nonzero even when there are
+no evaluated-device rows.
+
+Successful scope lists, discovery starts and individual batch response detail
+now require `-Verbose`; DEBUG uses `-Debug`. Those streams are not duplicated
+in the normal log. The deletion journal remains the submission/retry evidence.
+See [Reporting.md](Reporting.md#administrator-logging-and-reconciliation).
+
 ## "Missing required Microsoft Graph PowerShell module(s)"
 
 Install the modules named in the error message, for example:

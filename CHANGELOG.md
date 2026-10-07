@@ -2,6 +2,36 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- Route existing AD-sync and Autopilot protection exclusions to
+  `ADSyncedDevices.csv` and `AutopilotProtectedDevices.csv`, removing them from
+  `ExcludedDevices.csv` without changing primary reasons or deletion eligibility.
+  Retain `OnPremisesSyncedReview.csv` as a deprecated compatibility alias.
+- Reduce normal-log repetition, separate verbose/debug streams, preserve
+  terminal failure and verification warnings, redact credential-bearing text,
+  and omit raw Graph response bodies from error detail.
+- Generate final console/log totals from the same finalized run summary,
+  separating actual attempts, retries, removed/already-absent/submitted,
+  failed/unknown/blocked, simulated and unattempted operations.
+
+### Added
+
+- `ActionResults.csv` with unique planned operation outcomes and additive JSON
+  reason/resource/status counts, including run-level errors.
+- Offline regressions for report partitioning, overlapping protections,
+  eligibility preservation, failures, retries, uncertainty, dry-run counts,
+  diagnostic separation and summary reconciliation.
+
+### Fixed
+
+- Preserve excluded rows with missing reason evidence in `ExcludedDevices.csv`
+  without reporting errors under terminating PowerShell error preferences.
+  Summary reason counts label absent or empty reasons as `MissingReasonCode`;
+  protection and deletion eligibility remain unchanged.
+
 ## [1.3.0] - 2026-10-07
 
 ### Changed

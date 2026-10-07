@@ -167,7 +167,7 @@ function ConvertFrom-DeviceDeletionBatchResponse {
             if ([int]::TryParse([string]$entry.status, [ref]$parsedStatus)) { $httpStatus = $parsedStatus }
             $message = ''
             if ($entry.PSObject.Properties['body'] -and $entry.body) {
-                $message = $entry.body | ConvertTo-Json -Depth 10 -Compress
+                $message = Get-GraphResponseErrorText -Body $entry.body
             }
             if ($httpStatus -eq 204 -and $message) {
                 $message = "DELETE response contains an unexpected body: $message"
@@ -321,7 +321,6 @@ function Invoke-DeviceDeletionPlan {
                 if ($blocked) {
                     $results[$operation.Id].Status = 'BlockedDependency'
                     $results[$operation.Id].ErrorMessage = 'Required removal was not accepted.'
-                    Write-CleanupLog -Message "Blocked '$($operation.Id)': $($results[$operation.Id].ErrorMessage)" -Level WARNING -LogPath $LogPath
                 } elseif ($PSCmdlet.ShouldProcess("Tenant $($snapshot.TenantId): $phase/$($operation.ObjectId)", 'Delete approved device record')) {
                     $pending.Add($operation)
                 } else {
@@ -383,9 +382,7 @@ function Invoke-DeviceDeletionPlan {
                     foreach ($result in $parsed) {
                         $result.Attempts = $results[$result.Id].Attempts
                         $results[$result.Id] = $result
-                        if ($result.Status -notin 'Removed', 'RemovalSubmitted', 'AlreadyAbsent') {
-                            Write-CleanupLog -Message "Batch operation '$($result.Id)': $($result.Status), HTTP $($result.HttpStatus). $($result.ErrorMessage)" -Level WARNING -LogPath $LogPath
-                        }
+                        Write-CleanupLog -Message "Batch operation '$($result.Id)': $($result.Status), HTTP $($result.HttpStatus). $($result.ErrorMessage)" -Level VERBOSE -LogPath $LogPath
                     }
                     & $saveJournal 'Response'
                     if ($restoreError) {
@@ -407,6 +404,7 @@ function Invoke-DeviceDeletionPlan {
                             }
                             $retry = @()
                         } else {
+                            Write-CleanupLog -Message "Event=BatchRetry Resource=$phase Targets=$($retry.Count) Attempt=$attempt DelaySeconds=$delay" -Level WARNING -LogPath $LogPath
                             Start-Sleep -Seconds $delay
                         }
                     }
@@ -428,6 +426,7 @@ function Invoke-DeviceDeletionPlan {
         }
     } catch {
         Write-CleanupLog -Message $_.Exception.Message -Level ERROR -LogPath $LogPath
+        $_.Exception.Data['CleanupErrorLogged'] = $true
         throw
     } finally {
         foreach ($result in $results.Values) {
@@ -437,6 +436,12 @@ function Invoke-DeviceDeletionPlan {
             }
         }
         & $saveJournal 'Final'
+        foreach ($result in $operations | ForEach-Object { $results[$_.Id] } | Where-Object {
+            $_.Status -in 'RemovalFailed', 'OutcomeUnknown', 'BlockedDependency'
+        }) {
+            Write-CleanupLog -Message "Event=ActionAttention RunId=$($snapshot.RunId) Resource=$($result.Resource) ObjectId=$($result.ObjectId) Outcome=$($result.Status) Attempts=$($result.Attempts) HTTP=$($result.HttpStatus) Reason=$($result.ErrorMessage)" `
+                -Level WARNING -LogPath $LogPath
+        }
     }
     return @($operations | ForEach-Object { $results[$_.Id] })
 }
@@ -468,10 +473,11 @@ function Test-DeviceDeletionOutcome {
                 throw "Read-back returned HTTP $([int]$response.StatusCode); absence is not established."
             }
         } catch {
-            $message = "Verification for '$($Operation.Id)' failed: $($_.Exception.Message)"
+            $errorMessage = Get-GraphErrorMessage -ErrorRecord $_
+            $message = "Verification for '$($Operation.Id)' failed: $errorMessage"
             if ($LogPath) { Write-CleanupLog -Message $message -Level WARNING -LogPath $LogPath }
             else { Write-Warning $message }
-            return [PSCustomObject]@{ Status = 'OutcomeUnknown'; ErrorMessage = $_.Exception.Message }
+            return [PSCustomObject]@{ Status = 'OutcomeUnknown'; ErrorMessage = $errorMessage }
         } finally {
             if ($response -is [System.IDisposable]) { $response.Dispose() }
         }

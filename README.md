@@ -159,9 +159,17 @@ are configured. `ShouldProcess`/`-WhatIf`/`-Confirm` are still honored.
 
 Each run creates `output\<yyyyMMdd-HHmmss>\` containing
 `DeletionCandidates.csv`, `DeletedDevices.csv`, `UnknownDevices.csv`,
-`AmbiguousMatches.csv`, `ExcludedDevices.csv`, `ErrorDevices.csv`,
+`AmbiguousMatches.csv`, `ExcludedDevices.csv`, `ADSyncedDevices.csv`,
+`AutopilotProtectedDevices.csv`, `ErrorDevices.csv`, `ActionResults.csv`,
 `AllEvaluatedDevices.csv`, `ScrappedDeviceResults.csv`, `RunSummary.json`, and
 `ExecutionLog.txt`. See [docs/Reporting.md](docs/Reporting.md).
+
+AD-sync and Autopilot-protected exclusions are routed to separate reports and
+removed from `ExcludedDevices.csv`; all remain in `AllEvaluatedDevices.csv`.
+Existing primary-reason precedence is unchanged. `OnPremisesSyncedReview.csv`
+remains as a deprecated compatibility alias of `ADSyncedDevices.csv`.
+The normal log ends with reconciled device/action totals; per-operation outcomes
+are in `ActionResults.csv`, and routine diagnostic detail uses `-Verbose`/`-Debug`.
 
 ## Batch deletion
 

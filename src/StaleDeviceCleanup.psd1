@@ -32,6 +32,7 @@
         'Request-DeletionConfirmation',
         'Export-ReportCsv',
         'Export-CleanupReports',
+        'Get-CleanupActionRecords',
         'New-RunSummary',
         'Set-ScrappedDeviceOutcomes',
         'Get-ScrappedDeviceSerialNumbers',

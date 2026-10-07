@@ -14,14 +14,107 @@ by `Export-ReportCsv`). Every row includes the run's `RunId`.
 | `DeletedDevices.csv` | Subset where `EntraRemovalStatus` = `Removed`, or `AutopilotRemovalStatus` is `Removed`/`AlreadyRemoved` |
 | `UnknownDevices.csv` | Subset with `Decision = ManualReview` |
 | `AmbiguousMatches.csv` | Subset with `MatchStatus = Ambiguous` |
-| `ExcludedDevices.csv` | Subset with `Decision = Excluded` |
+| `ExcludedDevices.csv` | Other `Decision = Excluded` records, excluding `OnPremisesSyncProtected` and `AutopilotProtected` |
+| `ADSyncedDevices.csv` | Devices excluded with primary reason `OnPremisesSyncProtected`; includes `SourceADDeletionSafety = NotAssessed` |
+| `AutopilotProtectedDevices.csv` | Devices excluded with primary reason `AutopilotProtected`, including correlation and AD-sync evidence |
 | `ErrorDevices.csv` | Subset with a non-null `ErrorMessage` |
-| `OnPremisesSyncedReview.csv` | Stale client devices excluded specifically by the default on-premises sync protection; header-only when there are no such devices |
+| `OnPremisesSyncedReview.csv` | Compatibility alias of `ADSyncedDevices.csv`; deprecated name retained for existing consumers |
 | `ScrappedDeviceResults.csv` | Object-level Intune/Autopilot/Entra targets and outcomes, plus excluded/ambiguous/unmatched or lookup-failed serials; empty outside scrapped cleanup |
 | `RunSummary.json` | Machine-readable run outcome (counts, exit code, timestamps) |
-| `ExecutionLog.txt` | Human-readable structured log (DEBUG/INFO/WARNING/ERROR/SUCCESS) |
+| `ExecutionLog.txt` | Human-readable timestamped INFO/WARNING/ERROR/SUCCESS events and final summary; verbose/debug detail is not written here |
+| `ActionResults.csv` | One final row per unique planned DELETE operation, including unattempted or simulated targets |
 | `DeletionPlan.json` | Tenant/run/workflow, creation time, unique operations, prerequisites and SHA-256 hash; written before confirmation |
 | `DeletionJournal.jsonl` | Append-only submission intent, per-ID outcomes, attempts and final/verification checkpoints |
+
+## Administrator logging and reconciliation
+
+All new reports use the existing run folder and UTF-8 CSV helper. Protection
+reports and `ActionResults.csv` have stable headers even when empty.
+CSV reports are snapshots: written before confirmation where applicable and
+overwritten with final results within that run, never appended. Execution
+events and the deletion journal remain append-only within the run. Historical
+artifacts are not migrated or rewritten.
+
+Protection routing uses the classifier's existing **primary reason**, not a
+second eligibility evaluation. Autopilot protection precedes AD-sync protection:
+a device associated with both goes only to `AutopilotProtectedDevices.csv`,
+with `OnPremisesSyncEnabled` retained. Explicit protection and unsafe correlation
+can take precedence; those records retain their existing reason/report routing.
+Recent or missing activity on an AD-synced device does not make it an
+`OnPremisesSyncProtected` record. The explicit AD-sync override is unchanged.
+
+`AllEvaluatedDevices.csv` still contains every evaluated device. Reconcile:
+
+```text
+TotalEvaluated = TotalCandidates + TotalExcluded + TotalManualReview
+TotalExcluded = ADSyncedDevices rows + AutopilotProtectedDevices rows + ExcludedDevices rows
+```
+
+This intentionally changes `ExcludedDevices.csv` membership. Consumers needing
+all exclusions must filter `AllEvaluatedDevices.csv` by `Decision = Excluded`,
+or combine the three mutually exclusive reports. Do not also count the
+compatibility alias. The scrapped workflow continues to report exclusions in
+`ScrappedDeviceResults.csv`; Autopilot presence is not protection from an
+explicit, safely correlated scrapped cleanup.
+
+Device reports identify the run, evaluation time, friendly name, platform,
+Entra object/device IDs, available Intune/Autopilot IDs and serials, primary
+reason/description, correlation confidence, activity evidence and action
+outcome. Names are for recognition, never correlation authority. Missing values
+stay empty rather than being guessed.
+
+`ActionResults.csv` is finalized after journal recovery and includes `RunId`,
+`Workflow`, `FinalizedTimestampUtc`, `OperationId`, `Resource`, `ObjectId`,
+`DeviceName`, available `EntraDeviceId` and `SerialNumber`, `Action`,
+`ReasonCode`, `Outcome`, `Attempts`, `HttpStatus`, `VerificationStatus` and
+sanitized `ErrorMessage`. The timestamp describes finalization, **not** the
+time of deletion; use journal timestamps for submission/checkpoint evidence.
+Expanded scrapped rows are collapsed by the plan's unique resource/object ID.
+
+The completion block is written to the console and normal log from the same
+finalized `RunSummary.json` data. Additive fields include `TenantId`,
+`TotalADSyncedDevices`, `TotalAutopilotProtectedDevices`,
+`TotalOtherExcludedDevices`, `ExclusionsByReason`, `ManualReviewByReason`,
+`ScrappedExclusionsByReason`, `TotalPlannedActions`, `TotalAttemptedActions`,
+`TotalRetryAttempts`, `ActionOutcomes`, `ActionsByResource`,
+`TotalVerificationPending`, `TotalVerificationUnknown` and `TotalRunErrors`.
+Existing JSON fields keep their meaning.
+Direct module callers must supply finalized `ActionRecords` to
+`New-RunSummary` and `Complete-ProjectExecution` for operation totals and the
+action CSV; the script obtains these through `Get-CleanupActionRecords`.
+
+`ActionOutcomes` counts final statuses; its values sum to `TotalPlannedActions`
+and to `ActionResults.csv` rows. An attempted action has `Attempts > 0`, counted
+once even if retried; `TotalRetryAttempts` counts extra submission attempts.
+Submission intent without a trustworthy response remains `OutcomeUnknown`,
+not success. Audit/WhatIf actions have zero actual submission attempts.
+`Removed` is distinct from `AlreadyAbsent`/`AlreadyRemoved` and
+`RemovalSubmitted`; accepted Autopilot submission does not establish absence.
+Verification uncertainty remains separate from the DELETE outcome.
+`TotalRunErrors` counts errors reaching the run-level catch, including failures
+before any device can be evaluated; it can overlap device/serial errors and
+must not be added to them as a unique-error total.
+
+Normal logging keeps successful discovery counts, tenant identity, planning,
+authorization/safety gates, retry-round warnings, terminal operation failures,
+verification uncertainty and the completion summary. Each failed/unknown/blocked
+operation has a final `Event=ActionAttention` warning with run, resource,
+object ID, outcome, attempts, HTTP status and reason. A failed retry budget is
+visible even when no final Graph response exists. Successful individual results
+are in the action CSV and journal, not repeated in the normal log.
+
+Discovery starts, successful scope lists, protected-input paths and individual
+batch responses use `-Verbose`; DEBUG uses the debug stream. Neither diagnostic
+level is appended to `ExecutionLog.txt`. Preserve diagnostic streams using your
+PowerShell wrapper when needed; the journal still retains submission and retry
+evidence. Graph response detail is restricted to error code/message, not raw
+response dumps. Credential fields and bearer values are redacted from log/error
+text, and embedded newlines/quotes are escaped in text events.
+Credential redaction handles escaped quotes, and verification error text is
+sanitized before it reaches the journal or device CSV reports.
+Do not deliberately
+include credentials, tokens or unrelated personal data in diagnostic messages.
+Log-file write failures remain visible as warnings.
 
 ## Evaluated-device columns
 
