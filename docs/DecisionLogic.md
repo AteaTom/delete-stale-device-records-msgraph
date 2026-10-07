@@ -119,9 +119,9 @@ After confirmation, the scrapped-device operation follows this order:
 4. Remove every safely correlated eligible Entra target. Intune or Autopilot
    prerequisite failure blocks related Entra; independent targets continue.
    WhatIf simulates this dependency transition without making DELETE calls.
-5. Optional JsonBatch verification reads exact successful target IDs after
-   planned deletions and records absence separately from API acceptance. It
-   does not gate dependent Entra removal.
+5. Optional `-VerifyDeletion` reads exact successful target IDs after planned
+   deletions and records absence separately from API acceptance. It does not
+   gate dependent Entra removal.
 
 Entra deletion here is an intentional exception for explicit physical
 retirement, not routine cleanup after Autopilot deregistration. Microsoft's
@@ -158,6 +158,6 @@ platform, activity, protection and ambiguity checks satisfied. Only its Entra
 object is deleted after approval; Intune remains an activity/correlation source.
 No stale candidate is sent to Autopilot deletion.
 
-JsonBatch changes transport, not classification. It freezes the approved
-target set, rechecks context before each envelope and records partial outcomes.
+Batch deletion freezes the approved target set, rechecks context before each
+envelope and records partial outcomes. It does not change classification.
 See [BatchDeletion.md](BatchDeletion.md).

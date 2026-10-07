@@ -20,8 +20,8 @@ by `Export-ReportCsv`). Every row includes the run's `RunId`.
 | `ScrappedDeviceResults.csv` | Object-level Intune/Autopilot/Entra targets and outcomes, plus excluded/ambiguous/unmatched or lookup-failed serials; empty outside scrapped cleanup |
 | `RunSummary.json` | Machine-readable run outcome (counts, exit code, timestamps) |
 | `ExecutionLog.txt` | Human-readable structured log (DEBUG/INFO/WARNING/ERROR/SUCCESS) |
-| `DeletionPlan.json` | JsonBatch only: tenant/run/workflow, creation time, unique operations, prerequisites and SHA-256 hash; written before confirmation |
-| `DeletionJournal.jsonl` | JsonBatch only: append-only submission intent, per-ID outcomes, attempts and final/verification checkpoints |
+| `DeletionPlan.json` | Tenant/run/workflow, creation time, unique operations, prerequisites and SHA-256 hash; written before confirmation |
+| `DeletionJournal.jsonl` | Append-only submission intent, per-ID outcomes, attempts and final/verification checkpoints |
 
 ## Evaluated-device columns
 
@@ -133,10 +133,10 @@ The summary also includes unique input, matched,
 ambiguous, not-found, and error serial counts. This prevents one serial
 expanded across multiple object rows from inflating completion totals.
 
-Individual processing sends one supported Graph request per unique target;
-opt-in JsonBatch uses the same target/dependency policy. Each request uses
-the existing retry policy for transient failures, and a failed target is
-reported individually while processing continues for unrelated targets.
+Deletion uses Graph JSON batches of at most 20 unique target operations.
+Identified transient failures are retried within bounded limits, and a failed
+target is reported individually while processing continues for unrelated
+targets where safe.
 
 Only safely corroborated matches are reported as `Matched`; serial-only
 collisions remain `Ambiguous`. Protection, unsupported/missing platforms,
@@ -178,8 +178,8 @@ Denied or unsuccessful read-back never establishes absence. Verification
 uncertainty is logged and results in a non-success run outcome.
 See [BatchDeletion.md](BatchDeletion.md).
 
-Scrapped Autopilot read-back is mandatory before dependent Entra operations,
-not controlled by the optional final `VerifyDeletion` flag. Individual reports
-include its verification status too. Simulations report `NotRequested`, never
-`VerifiedAbsent`. If correlation evidence is gone, `NotFound` is not proof
+Accepted Autopilot DELETE responses permit dependent Entra operations;
+optional final `VerifyDeletion` read-back occurs afterward and does not gate
+that dependency. Simulations report `NotRequested`, never `VerifiedAbsent`.
+If correlation evidence is gone, `NotFound` is not proof
 that an historical Entra object was deleted.

@@ -63,8 +63,8 @@ All logic lives in `src/StaleDeviceCleanup.psm1`, organized by `#region`:
 | Reporting | `Export-CleanupReports`, `New-RunSummary`, `Set-ScrappedDeviceOutcomes` |
 | Lifecycle state | Legacy report fields only; direct deletion no longer uses a retention ledger |
 | Scrapped device cleanup | `Get-ScrappedDeviceSerialNumbers`, `Resolve-ScrappedDeviceRecords` – correlate `-ScrappedDevices` CSV serials against already-discovered Entra/Intune/Autopilot data, no extra Graph calls during resolution |
-| Deletion (guarded) | `Submit-WindowsAutopilotIdentityRemoval`, `Remove-EntraDeviceRecord`, `Remove-IntuneManagedDeviceRecord`, `Invoke-ScrappedDeviceRemoval` – all state-changing calls use `ShouldProcess` |
-| Batch transport | `src/DeviceDeletionBatch.ps1`, included by the module: hashed plans, guarded phased batching, per-ID parsing/retries, journal and verification |
+| Deletion planning and execution | `New-DeviceDeletionPlan` and `Invoke-DeviceDeletionPlan` – approval-bound plans, guarded phased batching, per-ID parsing/retries, journal and optional verification |
+| Result mapping and context | `Set-DeviceDeletionResults`, `Assert-DeviceCleanupContext`, `Test-DeviceDeletionOutcome` |
 | Execution lifecycle | `Initialize-ProjectExecution`, `Complete-ProjectExecution` |
 
 Discovery, correlation, evaluation, reporting, confirmation, and deletion are
@@ -102,9 +102,10 @@ record has already disappeared from the portal.
    and never enters the standard stale lifecycle.
 6. The stale branch excludes Autopilot-backed records and removes only
    eligible standalone Entra objects after approval.
-7. `Individual` remains the default transport. Opt-in `JsonBatch` executes
-   the same eligible set in independent batches of at most 20 operations,
-   with phased dependencies, tenant checks and journal checkpointing.
+7. The approved target set is executed only through Microsoft Graph JSON
+   batching, in independent envelopes of at most 20 operations. Phased
+   dependencies, per-target `ShouldProcess`, tenant checks and journal
+   checkpointing apply to every destructive run.
    [BatchDeletion.md](BatchDeletion.md) describes failure and verification semantics.
 
 The entry point uses separate Inactivity (default) and Scrapped parameter sets.

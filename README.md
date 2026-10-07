@@ -94,8 +94,8 @@ Only explicit scrapped hardware can be deregistered: remove Intune records
 first, then submit the Autopilot identity DELETE after successful prerequisites.
 Once Graph accepts the Autopilot DELETE (HTTP 204), explicit scrapped cleanup
 continues to remove safely correlated Entra objects without waiting for a
-read-back check. For JSON batch runs, `-VerifyDeletion` remains an optional
-post-operation read-back and does not gate dependent Entra removals.
+read-back check. Optional `-VerifyDeletion` performs bounded post-operation
+read-back and does not gate dependent Entra removals.
 This is an intentional hardware-retirement exception to Microsoft's advice
 against routine manual Entra deletion after deregistration:
 [deregistration guidance](https://learn.microsoft.com/autopilot/registration-overview#deregister-a-device). See
@@ -163,48 +163,47 @@ Each run creates `output\<yyyyMMdd-HHmmss>\` containing
 `AllEvaluatedDevices.csv`, `ScrappedDeviceResults.csv`, `RunSummary.json`, and
 `ExecutionLog.txt`. See [docs/Reporting.md](docs/Reporting.md).
 
-## Experimental JSON batch transport
+## Batch deletion
 
 Before confirmation, the workflow-specific summary shows tenant, mode,
-WhatIf and transport. Stale cleanup lists only planned standalone Entra
+WhatIf and planned operations. Stale cleanup lists only planned standalone Entra
 deletions; Autopilot-backed devices appear as retained. Scrapped cleanup
 counts serials with actual targets and unique Intune/Autopilot/Entra DELETE
 operations separately, with Intune and accepted Autopilot DELETE requests as
 the prerequisites for Entra deletion.
 Audit and WhatIf clearly indicate that no tenant DELETE requests are sent.
 
-Individual SDK deletions remain the default. `-DeletionTransport JsonBatch`
-packages at most 20 approved operations into each Graph v1.0 envelope.
-Classification and confirmation are unchanged; batches are not transactions.
-Each result is checked by request ID, and only transient failed subrequests
-are retried. No automatic fallback to another destructive transport occurs.
+All approved deletions use Microsoft Graph v1.0 JSON batching. Each envelope
+contains at most 20 operations (`-BatchSize` accepts 1-20). Classification and
+confirmation are unchanged; batches are not transactions. Every subresponse
+is checked by request ID, and only identified transient subrequest failures
+are retried. A failed or uncertain batch is never replayed through a different
+deletion path.
 
 ```powershell
 # Review the same plan without performing tenant writes.
 .\src\Invoke-StaleDeviceCleanup.ps1 -Mode Automatic -ConfirmDeletion `
-    -DeletionTransport JsonBatch -BatchSize 20 -WhatIf
+    -BatchSize 20 -WhatIf
 
-# Only after Audit/report review and explicit lab validation:
+# Optional bounded read-back after Audit/report review and explicit lab validation:
 .\src\Invoke-StaleDeviceCleanup.ps1 -Mode Interactive `
-    -DeletionTransport JsonBatch -BatchSize 20 -VerifyDeletion
+    -BatchSize 20 -VerifyDeletion
 ```
 
-Batch runs write a tenant-bound `DeletionPlan.json` before confirmation and an
+Runs write a tenant-bound `DeletionPlan.json` before confirmation and an
 append-only `DeletionJournal.jsonl` during execution. Plan hashes prevent
 post-approval target changes; they are not approver signatures. The executor
 rejects plans older than 30 minutes and checks delegated context/scopes before
 each envelope. A timeout, invalid response or authorization failure stops
 remaining execution; reconcile the journal before another destructive run.
 
-`-VerifyDeletion` is optional and requires JsonBatch. It reads each successful
-target at most three times, five seconds apart. `VerifiedAbsent` is distinct
-from DELETE acceptance and portal synchronization. See
+`-VerifyDeletion` reads each successful target at most three times, five
+seconds apart. `VerifiedAbsent` is distinct from DELETE acceptance and portal
+synchronization. See
 [docs/BatchDeletion.md](docs/BatchDeletion.md) for limits, safeguards and testing.
 
-See the [batch-removal rollout plan](docs/BatchRemovalMigrationPlan.md) for
-implemented safeguards, operator migration requirements, remaining validation
-gates, and staged adoption of the existing JsonBatch transport. Individual
-remains the default; no serial-based Autopilot bulk backend is proposed.
+Batching changes only the deletion transport: classification, protection, and
+correlation remain unchanged. No serial-based Autopilot bulk action is used.
 
 ## Scrapped devices (explicit serial-number removal)
 
@@ -255,7 +254,7 @@ identity DELETE only if required Intune removals succeeded. A failed or skipped
 prerequisite blocks dependent operations. Accepted Autopilot deletion is
 reported as `RemovalSubmitted`; the successful Graph DELETE response is
 sufficient to proceed with corresponding Entra
-deletion. JSON batch `-VerifyDeletion` optionally performs exact-ID read-back
+deletion. `-VerifyDeletion` optionally performs exact-ID read-back
 after all planned DELETE operations; its result is diagnostic and does not
 gate the dependency sequence. Failed/declined Autopilot removal still blocks
 Entra deletion, while independent targets continue.
@@ -281,40 +280,6 @@ all-service policy. Input serials cannot rediscover Entra records after both
 Intune and Autopilot correlation evidence is gone. `NotFound` is not proof that
 the Entra object is absent; preserve earlier reports for manual reconciliation.
 No historical report is automatically replayed or used as deletion authority.
-
-### Calling the reusable Intune batch-removal helper
-
-The helper accepts already-matched record objects and processes each unique
-Intune managed-device ID once using individual retry-enabled Graph requests.
-This is collection processing, not Microsoft Graph JSON batching. `-WhatIf`
-shows the intended action without sending a Graph DELETE:
-
-```powershell
-Import-Module .\src\StaleDeviceCleanup.psd1
-
-$records = @(
-    [PSCustomObject]@{
-        MatchStatus            = 'Matched'
-        InputSerialNumber      = 'SCRAP-001'
-        IntuneManagedDeviceId  = 'synthetic-intune-id'
-        IntuneRemovalStatus    = 'NotAttempted'
-        ErrorMessage           = $null
-    }
-)
-
-Invoke-ScrappedDeviceBatchRemoval `
-    -ScrappedDeviceRecords $records `
-    -TargetType Intune `
-    -WhatIf `
-    -Confirm:$false
-
-$records | Select-Object InputSerialNumber, IntuneManagedDeviceId, IntuneRemovalStatus
-```
-
-The record's status becomes `WhatIf`; non-`Matched` records and records without
-an Intune ID are not removed. For normal tenant cleanup, prefer the
-`-ScrappedDevices` script workflow above: it performs discovery, validation,
-confirmation, dependency ordering, and reporting for all three services.
 
 Microsoft reference: [Windows Autopilot deregistration guidance](https://learn.microsoft.com/autopilot/registration-overview#deregister-a-device)
 

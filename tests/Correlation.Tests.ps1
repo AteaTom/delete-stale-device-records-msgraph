@@ -81,32 +81,3 @@ Describe 'Resolve-DeviceCorrelation' {
         $result.MatchConfidence | Should -Be 'Unmatched'
     }
 }
-
-Describe 'Remove-EntraDeviceRecord identifier usage' {
-    It 'calls Remove-MgDevice using the Entra object id, not the physical deviceId' {
-        Mock -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -MockWith { }
-        $objectId = (New-Guid).ToString()
-        Remove-EntraDeviceRecord -EntraObjectId $objectId -Confirm:$false | Out-Null
-        Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -ParameterFilter { $DeviceId -eq $objectId } -Times 1
-    }
-
-    It 'treats an already absent Entra object as a successful removal' {
-        Mock -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -MockWith {
-            $exception = [System.Exception]::new('[Request_ResourceNotFound] The device does not exist.')
-            $exception | Add-Member -NotePropertyName ResponseStatusCode -NotePropertyValue 404
-            throw $exception
-        }
-
-        Remove-EntraDeviceRecord -EntraObjectId 'already-removed' -Confirm:$false | Should -BeTrue
-    }
-
-    It 'still throws non-404 Graph failures' {
-        Mock -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -MockWith {
-            $exception = [System.Exception]::new('Forbidden')
-            $exception | Add-Member -NotePropertyName ResponseStatusCode -NotePropertyValue 403
-            throw $exception
-        }
-
-        { Remove-EntraDeviceRecord -EntraObjectId 'forbidden' -Confirm:$false } | Should -Throw '*Forbidden*'
-    }
-}
