@@ -11,8 +11,6 @@ reporting, validating, and optionally removing stale device records from:
 
 Repository:
 
-C:\Users\Tom Eriksson\source\repos\delete-stale-device-records-msgraph
-
 This file defines the permanent engineering, safety, testing, and development
 conventions for any AI coding agent working in this repository.
 
