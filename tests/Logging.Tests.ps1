@@ -76,6 +76,65 @@ Describe 'Administrator protection report routing' {
         ($evaluated | Where-Object EntraObjectId -eq sync).Decision | Should -Be Candidate
         ($evaluated | Where-Object EntraObjectId -eq both).ReasonCode | Should -Be AutopilotProtected
     }
+
+    It 'retains excluded rows without reason evidence under terminating error preferences' {
+        $ErrorActionPreference = 'Stop'
+        $records = @(
+            foreach ($id in 'missing', 'null', 'empty') {
+                $record = [PSCustomObject]@{
+                    EntraObjectId = $id; Decision = 'Excluded'; MatchStatus = 'Unmatched'
+                    EntraRemovalStatus = 'NotAttempted'; AutopilotRemovalStatus = 'NotAttempted'
+                    ErrorMessage = $null
+                }
+                if ($id -ne 'missing') {
+                    $record | Add-Member -NotePropertyName ReasonCode -NotePropertyValue $(if ($id -eq 'null') { $null } else { '' })
+                }
+                $record
+            }
+        )
+        $before = $records | ConvertTo-Json
+        Export-CleanupReports -AllEvaluatedDevices $records -OutputPath $TestDrive
+        $other = @(Import-Csv (Join-Path $TestDrive 'ExcludedDevices.csv'))
+        $other.Count | Should -Be 3
+        foreach ($id in 'missing', 'null', 'empty') { $other.EntraObjectId | Should -Contain $id }
+        foreach ($file in 'ADSyncedDevices.csv', 'AutopilotProtectedDevices.csv', 'DeletionCandidates.csv') {
+            @(Import-Csv (Join-Path $TestDrive $file)).Count | Should -Be 0
+        }
+        ($records | ConvertTo-Json) | Should -BeExactly $before
+    }
+
+    It 'reconciles missing exclusion and review reasons without claiming protection or deletion' {
+        $ErrorActionPreference = 'Stop'
+        $records = @(
+            foreach ($decision in 'Excluded', 'ManualReview') {
+                foreach ($kind in 'missing', 'null', 'empty') {
+                    $record = [PSCustomObject]@{
+                        Decision = $decision; EntraRemovalStatus = 'NotAttempted'
+                        AutopilotRemovalStatus = 'NotAttempted'; ErrorMessage = $null
+                    }
+                    if ($kind -ne 'missing') {
+                        $record | Add-Member -NotePropertyName ReasonCode -NotePropertyValue $(if ($kind -eq 'null') { $null } else { '' })
+                    }
+                    $record
+                }
+            }
+        )
+        $before = $records | ConvertTo-Json
+        $summary = New-RunSummary -RunId missing-reasons -Mode Audit -StartTimeUtc $cutoff `
+            -CutoffDateUtc $cutoff -DaysInactive 180 -AllEvaluatedDevices $records
+        $summary.TotalEvaluated | Should -Be 6
+        $summary.TotalExcluded | Should -Be 3
+        $summary.TotalManualReview | Should -Be 3
+        $summary.TotalOtherExcludedDevices | Should -Be 3
+        $summary.TotalADSyncedDevices | Should -Be 0
+        $summary.TotalAutopilotProtectedDevices | Should -Be 0
+        $summary.ExclusionsByReason.MissingReasonCode | Should -Be 3
+        $summary.ManualReviewByReason.MissingReasonCode | Should -Be 3
+        $summary.TotalCandidates | Should -Be 0
+        $summary.TotalEntraDevicesToRemove | Should -Be 0
+        $summary.TotalEntraDevicesRemoved | Should -Be 0
+        ($records | ConvertTo-Json) | Should -BeExactly $before
+    }
 }
 
 Describe 'Action results and reconciled completion summaries' {

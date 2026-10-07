@@ -25,6 +25,13 @@ All notable changes to this project are documented in this file.
   eligibility preservation, failures, retries, uncertainty, dry-run counts,
   diagnostic separation and summary reconciliation.
 
+### Fixed
+
+- Preserve excluded rows with missing reason evidence in `ExcludedDevices.csv`
+  without reporting errors under terminating PowerShell error preferences.
+  Summary reason counts label absent or empty reasons as `MissingReasonCode`;
+  protection and deletion eligibility remain unchanged.
+
 ## [1.3.0] - 2026-10-07
 
 ### Changed

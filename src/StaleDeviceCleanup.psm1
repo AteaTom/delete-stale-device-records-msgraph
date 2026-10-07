@@ -1032,8 +1032,8 @@ function Export-CleanupReports {
 
     $candidates = @($AllEvaluatedDevices | Where-Object Decision -eq 'Candidate')
     $excluded = @($AllEvaluatedDevices | Where-Object Decision -eq 'Excluded')
-    $autopilotProtected = @($excluded | Where-Object ReasonCode -eq 'AutopilotProtected')
-    $otherExcluded = @($excluded | Where-Object ReasonCode -notin 'OnPremisesSyncProtected', 'AutopilotProtected')
+    $autopilotProtected = @($excluded | Where-Object { $_.PSObject.Properties['ReasonCode'] -and $_.ReasonCode -eq 'AutopilotProtected' })
+    $otherExcluded = @($excluded | Where-Object { -not $_.PSObject.Properties['ReasonCode'] -or $_.ReasonCode -notin 'OnPremisesSyncProtected', 'AutopilotProtected' })
     $manualReview = @($AllEvaluatedDevices | Where-Object Decision -eq 'ManualReview')
     $ambiguous = @($AllEvaluatedDevices | Where-Object MatchStatus -eq 'Ambiguous')
     $errors = @($AllEvaluatedDevices | Where-Object { $_.ErrorMessage })
@@ -1227,14 +1227,15 @@ function New-RunSummary {
         TotalRunErrors            = $RunErrorCount
     }
     $summary.TotalADSyncedDevices = $onPremisesSyncReview.Count
-    $summary.TotalAutopilotProtectedDevices = @($excluded | Where-Object ReasonCode -eq 'AutopilotProtected').Count
+    $summary.TotalAutopilotProtectedDevices = @($excluded | Where-Object { $_.PSObject.Properties['ReasonCode'] -and $_.ReasonCode -eq 'AutopilotProtected' }).Count
     $summary.TotalOtherExcludedDevices = $excluded.Count - $summary.TotalADSyncedDevices - $summary.TotalAutopilotProtectedDevices
     $summary.ExclusionsByReason = [ordered]@{}
-    foreach ($group in @($excluded | Group-Object ReasonCode | Sort-Object Name)) {
+    $reasonGroup = { if ($_.PSObject.Properties['ReasonCode'] -and -not [string]::IsNullOrWhiteSpace($_.ReasonCode)) { $_.ReasonCode } else { 'MissingReasonCode' } }
+    foreach ($group in @($excluded | Group-Object -Property $reasonGroup | Sort-Object Name)) {
         $summary.ExclusionsByReason[$group.Name] = $group.Count
     }
     $summary.ManualReviewByReason = [ordered]@{}
-    foreach ($group in @($manualReview | Group-Object ReasonCode | Sort-Object Name)) {
+    foreach ($group in @($manualReview | Group-Object -Property $reasonGroup | Sort-Object Name)) {
         $summary.ManualReviewByReason[$group.Name] = $group.Count
     }
     $summary.ScrappedExclusionsByReason = [ordered]@{}
