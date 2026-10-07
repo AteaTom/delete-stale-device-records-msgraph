@@ -14,6 +14,112 @@ BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
 }
 
+Describe 'Show-CleanupSummary workflow semantics' {
+    BeforeEach {
+        Mock Write-Host -ModuleName StaleDeviceCleanup { }
+    }
+
+    It 'counts only unique actionable standalone Entra targets' {
+        $record = [PSCustomObject]@{
+            Decision = 'Candidate'; EntraAction = 'Remove'; EntraObjectId = 'obj1'
+            Platform = 'iOS'; AutopilotPresent = $false; ReasonCode = 'Stale'
+        }
+        $blocked = [PSCustomObject]@{
+            Decision = 'Candidate'; EntraAction = 'Remove'; EntraObjectId = 'obj2'
+            Platform = 'Windows'; AutopilotPresent = $true; ReasonCode = 'Stale'
+        }
+        $review = [PSCustomObject]@{
+            Decision = 'ManualReview'; EntraAction = 'None'; EntraObjectId = 'obj3'
+            Platform = 'Windows'; AutopilotPresent = $false; ReasonCode = 'LowConfidenceMatch'
+        }
+        Show-CleanupSummary -EvaluatedDevices @($record, $record, $blocked, $review) `
+            -CutoffDateUtc ([datetime]::UtcNow) -DaysInactive 180 -OutputPath $TestDrive `
+            -TenantId tenant1 -Mode Automatic -Simulation $true -DeletionTransport JsonBatch
+        Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -Exactly -ParameterFilter {
+            $Object -eq '  Entra objects to remove:      1'
+        }
+        Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 0 -ParameterFilter {
+            $Object -like '*Windows with Autopilot*' -or $Object -like '*Autopilot records to remove*'
+        }
+        Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
+            $Object -eq 'Mode: Automatic; WhatIf: True; transport: JsonBatch'
+        }
+        Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
+            $Object -eq 'No tenant DELETE requests will be sent.'
+        }
+    }
+
+    It 'shows zero targets for empty input and an explicit Audit warning' {
+        Show-CleanupSummary -EvaluatedDevices @() -CutoffDateUtc ([datetime]::UtcNow) `
+            -DaysInactive 180 -OutputPath $TestDrive
+        Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
+            $Object -eq '  Entra objects to remove:      0'
+        }
+        Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
+            $Object -eq 'No tenant DELETE requests will be sent.'
+        }
+    }
+
+    It 'separates protection and review categories' {
+        $records = @(
+            foreach ($reason in 'AutopilotProtected','ProtectedDevice','OnPremisesSyncProtected','UnsupportedPlatform','RecentActivityDetected') {
+                [PSCustomObject]@{ Decision = 'Excluded'; ReasonCode = $reason }
+            }
+            foreach ($reason in 'MissingAllActivity','MissingOperatingSystem','LowConfidenceMatch','AmbiguousAutopilotMatch') {
+                [PSCustomObject]@{ Decision = 'ManualReview'; ReasonCode = $reason }
+            }
+        )
+        Show-CleanupSummary -EvaluatedDevices $records -CutoffDateUtc ([datetime]::UtcNow) `
+            -DaysInactive 180 -OutputPath $TestDrive
+        foreach ($line in @(
+            '  Autopilot-backed (retained):   1', '  Explicitly protected:         1',
+            '  On-premises sync protected:   1', '  Low-confidence AP matches:    1',
+            '  Total excluded:               5', '  Total manual review:          4'
+        )) {
+            Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
+                $Object -eq $line
+            }
+        }
+    }
+}
+
+Describe 'Export-ReportCsv UTC serialization' {
+    It 'preserves full precision and original values for <Kind>' -TestCases @(
+        @{ Kind = 'Utc' }, @{ Kind = 'Local' }, @{ Kind = 'Unspecified' }, @{ Kind = 'Offset' }
+    ) {
+        param($Kind)
+        $utc = [datetime]::new(2026, 4, 9, 18, 51, 36, [DateTimeKind]::Utc).AddTicks(5885471)
+        $timestamp = switch ($Kind) {
+            Utc { $utc }
+            Local { $utc.ToLocalTime() }
+            Unspecified { [datetime]::SpecifyKind($utc, [DateTimeKind]::Unspecified) }
+            Offset { [datetimeoffset]::new($utc).ToOffset([timespan]::FromHours(2)) }
+        }
+        $record = [PSCustomObject][ordered]@{
+            TimestampUtc = $timestamp; Text = '2026-04-09 18:51:36'
+            MissingUtc = $null; Count = 7
+        }
+        $path = Join-Path $TestDrive 'timestamps.csv'
+        Export-ReportCsv -InputObject @($record) -Path $path
+        $csv = Import-Csv $path
+        $csv.TimestampUtc | Should -BeExactly '2026-04-09T18:51:36.5885471Z'
+        $csv.Text | Should -BeExactly $record.Text
+        $csv.MissingUtc | Should -BeNullOrEmpty
+        $csv.Count | Should -Be '7'
+        ($csv.PSObject.Properties.Name -join ',') | Should -Be 'TimestampUtc,Text,MissingUtc,Count'
+        $record.TimestampUtc | Should -Be $timestamp
+        $record.TimestampUtc.GetType() | Should -Be $timestamp.GetType()
+        if ($timestamp -is [datetime]) { $record.TimestampUtc.Kind | Should -Be $timestamp.Kind }
+    }
+
+    It 'rejects an unspecified date without an explicit UTC field contract' {
+        $record = [PSCustomObject]@{ Timestamp = [datetime]::new(2026, 4, 9) }
+        { Export-ReportCsv -InputObject @($record) -Path (Join-Path $TestDrive 'ambiguous.csv') } |
+            Should -Throw '*no timezone*'
+        Test-Path (Join-Path $TestDrive 'ambiguous.csv') | Should -BeFalse
+    }
+}
+
 Describe 'Export-CleanupReports' {
     BeforeEach {
         $script:testOutputPath = Join-Path ([System.IO.Path]::GetTempPath()) "sdc-test-$(New-Guid)"
@@ -66,6 +172,17 @@ Describe 'Export-CleanupReports' {
         $review[0].EntraObjectId | Should -Be 'stale-sync'
         $review[0].ReasonCode | Should -Be 'OnPremisesSyncProtected'
         $review[0].SourceADDeletionSafety | Should -Be 'NotAssessed'
+        $summary = New-RunSummary -RunId r1 -Mode Audit -StartTimeUtc $cutoff -CutoffDateUtc $cutoff `
+            -DaysInactive 180 -AllEvaluatedDevices $evaluated
+        $json = $summary | ConvertTo-Json
+        $jsonCutoff = [regex]::Match($json, '"CutoffDateUtc"\s*:\s*"([^"]+)"').Groups[1].Value
+        foreach ($name in 'AllEvaluatedDevices', 'ExcludedDevices', 'OnPremisesSyncedReview') {
+            $row = @(Import-Csv (Join-Path $script:testOutputPath "$name.csv") |
+                Where-Object EntraObjectId -eq 'stale-sync')[0]
+            $row.CutoffDateUtc | Should -BeExactly $jsonCutoff
+            $row.EffectiveLastActivityUtc | Should -BeExactly $evaluated[0].EffectiveLastActivityUtc.ToString('o')
+        }
+        $evaluated[0].CutoffDateUtc | Should -BeOfType ([datetime])
     }
 }
 
@@ -145,10 +262,33 @@ Describe 'New-RunSummary' {
         $summary.TotalScrappedMatchedSerials | Should -Be 2
         $summary.TotalScrappedNotFoundSerials | Should -Be 1
         $summary.TotalScrappedAutopilotRemovalSubmitted | Should -Be 1
+        $summary.TotalScrappedAutopilotRemovalFailed | Should -Be 1
         $summary.TotalScrappedIntuneDevicesRemoved | Should -Be 1
         $summary.TotalScrappedEntraDevicesRemoved | Should -Be 1
+        $summary.TotalScrappedEntraDevicesBlockedByAutopilot | Should -Be 1
         $summary.TotalScrappedErrors | Should -Be 1
         $summary.TotalErrors | Should -Be 1
+    }
+
+    It 'counts accepted and already-absent scrapped targets once by object ID' {
+        $records = @(
+            [PSCustomObject]@{ NormalizedSerialNumber = 'serial1'; MatchStatus = 'Matched'; AutopilotIdentityId = 'ap1'; IntuneManagedDeviceId = 'intune1'; EntraObjectId = 'entra1'; AutopilotRemovalStatus = 'RemovalSubmitted'; IntuneRemovalStatus = 'AlreadyRemoved'; EntraRemovalStatus = 'AlreadyRemoved'; ErrorMessage = $null },
+            [PSCustomObject]@{ NormalizedSerialNumber = 'serial1'; MatchStatus = 'Matched'; AutopilotIdentityId = 'ap1'; IntuneManagedDeviceId = 'intune1'; EntraObjectId = 'entra1'; AutopilotRemovalStatus = 'RemovalSubmitted'; IntuneRemovalStatus = 'AlreadyRemoved'; EntraRemovalStatus = 'AlreadyRemoved'; ErrorMessage = $null },
+            [PSCustomObject]@{ NormalizedSerialNumber = 'serial2'; MatchStatus = 'Matched'; AutopilotIdentityId = 'ap2'; IntuneManagedDeviceId = 'intune2'; EntraObjectId = 'entra2'; AutopilotRemovalStatus = 'AlreadyRemoved'; IntuneRemovalStatus = 'Removed'; EntraRemovalStatus = 'Removed'; ErrorMessage = $null }
+        )
+
+        $summary = New-RunSummary -RunId 'r6' -Mode 'Automatic' -StartTimeUtc (Get-Date).ToUniversalTime() -CutoffDateUtc (Get-Date).ToUniversalTime() -DaysInactive 180 -AllEvaluatedDevices @() -ScrappedDeviceRecords $records
+
+        $summary.TotalScrappedAutopilotRemovalSubmitted | Should -Be 1
+        $summary.TotalScrappedAutopilotAlreadyRemoved | Should -Be 1
+        $summary.TotalScrappedAutopilotRemovalFailed | Should -Be 0
+        $summary.TotalScrappedIntuneDevicesRemoved | Should -Be 1
+        $summary.TotalScrappedIntuneDevicesAlreadyRemoved | Should -Be 1
+        $summary.TotalScrappedIntuneDevicesFailed | Should -Be 0
+        $summary.TotalScrappedEntraDevicesRemoved | Should -Be 1
+        $summary.TotalScrappedEntraDevicesAlreadyRemoved | Should -Be 1
+        $summary.TotalScrappedEntraDevicesFailed | Should -Be 0
+        $summary.TotalScrappedEntraDevicesBlockedByAutopilot | Should -Be 0
     }
 }
 

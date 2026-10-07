@@ -9,24 +9,26 @@ are used or required.
 | Cmdlet | Module | Minimum delegated permission |
 | --- | --- | --- |
 | `Get-MgDevice` | Microsoft.Graph.Identity.DirectoryManagement | `Device.Read.All` |
-| `Remove-MgDevice` | Microsoft.Graph.Identity.DirectoryManagement | `Device.ReadWrite.All` |
+| `Remove-MgDevice` | Microsoft.Graph.Identity.DirectoryManagement | `Directory.AccessAsUser.All` |
 | `Get-MgDeviceManagementManagedDevice` | Microsoft.Graph.DeviceManagement | `DeviceManagementManagedDevices.Read.All` |
 | `Get-MgDeviceManagementWindowsAutopilotDeviceIdentity` | Microsoft.Graph.DeviceManagement.Enrollment | `DeviceManagementServiceConfig.Read.All` |
 | `Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity` | Microsoft.Graph.DeviceManagement.Enrollment | `DeviceManagementServiceConfig.ReadWrite.All` |
 | `Remove-MgDeviceManagementManagedDevice` | Microsoft.Graph.DeviceManagement | `DeviceManagementManagedDevices.ReadWrite.All` |
 
-Confirmed against the official Microsoft Graph PowerShell SDK reference
-(`learn.microsoft.com/powershell/module/...`) at the time this project was
-built. Re-verify against current documentation before each major release,
-since Microsoft periodically updates minimum-privilege guidance.
+Updated against the current [device DELETE reference](https://learn.microsoft.com/graph/api/device-delete?view=graph-rest-1.0)
+and [Remove-MgDevice reference](https://learn.microsoft.com/powershell/module/microsoft.graph.identity.directorymanagement/remove-mgdevice?view=graph-powershell-1.0).
+`Device.ReadWrite.All` is documented for **application** deletion, not this
+project's delegated flow. `Directory.AccessAsUser.All` is a broad permission:
+obtain explicit administrator consent and review least privilege before enabling
+Entra deletion. No consent or tenant authorization was validated by offline tests.
 
 ## Scopes requested by mode
 
 | Mode | Scopes requested |
 | --- | --- |
 | Audit | `Device.Read.All`, `DeviceManagementManagedDevices.Read.All`, `DeviceManagementServiceConfig.Read.All` |
-| Interactive / Automatic | All read scopes above, plus `Device.ReadWrite.All` and `DeviceManagementServiceConfig.ReadWrite.All` |
-| Interactive / Automatic with `-ScrappedDeviceCsvPath` | All of the above, plus `DeviceManagementManagedDevices.ReadWrite.All` (required to remove Intune managed-device records for scrapped hardware) |
+| Interactive / Automatic | All read scopes above, plus `Directory.AccessAsUser.All` |
+| Interactive / Automatic with `-ScrappedDevices` | All read scopes above, plus `DeviceManagementManagedDevices.ReadWrite.All`, `DeviceManagementServiceConfig.ReadWrite.All` and `Directory.AccessAsUser.All` |
 
 `Test-GraphPermissions` compares the scopes actually granted to the signed-in
 session (`(Get-MgContext).Scopes`) against the scopes required for the
@@ -60,13 +62,22 @@ before use in those environments.
 
 ## What destructive modes can and cannot do
 
-- Deletion modes (Interactive, Automatic) may remove **only**: Windows
-  Autopilot device identities and Microsoft Entra ID device objects.
+- Stale cleanup removes eligible standalone Microsoft Entra device objects;
+  Autopilot-backed objects are protected, not deregistered by activity.
 - Intune managed-device records are **never** deleted by the activity-based
   stale-device workflow, in any mode.
-- The one exception is the explicit `-ScrappedDeviceCsvPath` workflow: for
+- The one exception is the explicit `-ScrappedDevices` workflow: for
   serial numbers you provide, it removes the matching Windows Autopilot
-  identity, Intune managed device, and Entra device object. It never acts on
+  identity, Intune managed device, and safely correlated Entra objects only
+  after verified Autopilot absence. It never acts on
   any serial number not present in that file.
 - iOS and Android devices are never looked up in, or deleted from, Windows
   Autopilot.
+
+JSON batching uses the same individual v1.0 DELETE permissions. There is no
+batch permission or permission bypass. Each envelope rechecks the approved
+tenant, delegated authentication, public-cloud environment and required scopes.
+Entra deletion also requires a supported role (Cloud Device Administrator,
+Intune Administrator or Windows 365 Administrator, or a supported custom role).
+The server remains authoritative for role/RBAC authorization; scope checks
+cannot establish that a specific operation will be allowed.

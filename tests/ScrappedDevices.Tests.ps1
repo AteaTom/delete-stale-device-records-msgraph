@@ -7,6 +7,8 @@ BeforeAll {
     function global:Remove-MgDevice { param([string]$DeviceId) }
     function global:Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity { param([string]$WindowsAutopilotDeviceIdentityId) }
     function global:Remove-MgDeviceManagementManagedDevice { param([string]$ManagedDeviceId) }
+    function global:Get-MgContext { }
+    function global:Invoke-MgGraphRequest { param([string]$Method, [string]$Uri, [string]$OutputType, [switch]$SkipHttpErrorCheck) }
 
     $modulePath = Join-Path $PSScriptRoot '..\src\StaleDeviceCleanup.psd1'
     Import-Module $modulePath -Force
@@ -22,7 +24,7 @@ Describe 'Get-ScrappedDeviceSerialNumbers' {
     }
 
     It 'trims whitespace, skips blank lines, and de-duplicates case-insensitively' {
-        Set-Content -LiteralPath $script:csvPath -Value @('  5CD3271HSD  ', '', '5cd3271hsd', '5CD8245V12')
+        Set-Content -LiteralPath $script:csvPath -Value @('SerialNumber', '  5CD3271HSD  ', '', '5cd3271hsd', '5CD8245V12')
         $statistics = $null
         $result = Get-ScrappedDeviceSerialNumbers -Path $script:csvPath -Statistics ([ref]$statistics)
         $result | Should -Be @('5CD3271HSD', '5CD8245V12')
@@ -43,7 +45,7 @@ Describe 'Get-ScrappedDeviceSerialNumbers' {
 Describe 'Resolve-ScrappedDeviceRecords' {
     BeforeAll {
         $script:entraDevice = New-TestEntraDevice -Id 'entra1' -DeviceId 'aad-device-1' -DisplayName 'SCRAPPED-01'
-        $script:intuneDevice = [PSCustomObject]@{ Id = 'intune1'; AzureAdDeviceId = 'aad-device-1'; SerialNumber = '5CD3271HSD'; DeviceName = 'SCRAPPED-01' }
+        $script:intuneDevice = [PSCustomObject]@{ Id = 'intune1'; AzureAdDeviceId = 'aad-device-1'; SerialNumber = '5CD3271HSD'; DeviceName = 'SCRAPPED-01'; OperatingSystem = 'Windows' }
         $script:autopilotDevice = [PSCustomObject]@{ Id = 'ap1'; AzureActiveDirectoryDeviceId = 'aad-device-1'; ManagedDeviceId = 'intune1'; SerialNumber = '5CD3271HSD'; EnrollmentState = 'enrolled' }
     }
 
@@ -64,23 +66,23 @@ Describe 'Resolve-ScrappedDeviceRecords' {
         ($result | Where-Object { $_.MatchStatus -eq 'Matched' }).Count | Should -BeGreaterThan 0
     }
 
-    It 'returns every related Entra and Intune object for a serial that exists in Autopilot' {
+    It 'fails closed on duplicate Intune and Entra serial matches even with Autopilot present' {
         $entraDeviceTwo = New-TestEntraDevice -Id 'entra2' -DeviceId 'aad-device-2' -DisplayName 'SCRAPPED-02'
-        $intuneDeviceTwo = [PSCustomObject]@{ Id = 'intune2'; AzureAdDeviceId = 'aad-device-2'; SerialNumber = '5CD3271HSD'; DeviceName = 'SCRAPPED-02' }
+        $intuneDeviceTwo = [PSCustomObject]@{ Id = 'intune2'; AzureAdDeviceId = 'aad-device-2'; SerialNumber = '5CD3271HSD'; DeviceName = 'SCRAPPED-02'; OperatingSystem = 'Windows' }
         $autopilotDevice = [PSCustomObject]@{ Id = 'ap1'; AzureActiveDirectoryDeviceId = 'aad-device-1'; ManagedDeviceId = 'intune1'; SerialNumber = '5CD3271HSD'; EnrollmentState = 'enrolled' }
 
         $result = Resolve-ScrappedDeviceRecords -SerialNumbers @('5CD3271HSD') -EntraDevices @($script:entraDevice, $entraDeviceTwo) `
             -IntuneDevices @($script:intuneDevice, $intuneDeviceTwo) -AutopilotDevices @($autopilotDevice) -RunId 'r1'
 
-        $result.Count | Should -Be 5
-        ($result | Where-Object { $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId | Sort-Object -Unique) | Should -Be @('ap1')
-        ($result | Where-Object { $_.IntuneManagedDeviceId } | Select-Object -ExpandProperty IntuneManagedDeviceId | Sort-Object -Unique) | Should -Be @('intune1', 'intune2')
-        ($result | Where-Object { $_.EntraObjectId } | Select-Object -ExpandProperty EntraObjectId | Sort-Object -Unique) | Should -Be @('entra1', 'entra2')
-        ($result | Select-Object -ExpandProperty MatchStatus | Sort-Object -Unique) | Should -Be @('Matched')
+        $result.Count | Should -Be 1
+        $result[0].MatchStatus | Should -Be 'Ambiguous'
+        $result[0].AutopilotIdentityId | Should -BeNullOrEmpty
+        $result[0].IntuneManagedDeviceId | Should -BeNullOrEmpty
+        $result[0].EntraObjectId | Should -BeNullOrEmpty
     }
 
     It 'flags a duplicate serial number as Ambiguous and never selects a single match when there is no Autopilot authority' {
-        $duplicateIntune = [PSCustomObject]@{ Id = 'intune2'; AzureAdDeviceId = 'aad-device-2'; SerialNumber = '5CD3271HSD'; DeviceName = 'SCRAPPED-02' }
+        $duplicateIntune = [PSCustomObject]@{ Id = 'intune2'; AzureAdDeviceId = 'aad-device-2'; SerialNumber = '5CD3271HSD'; DeviceName = 'SCRAPPED-02'; OperatingSystem = 'Windows' }
         $result = Resolve-ScrappedDeviceRecords -SerialNumbers @('5CD3271HSD') -EntraDevices @($script:entraDevice) `
             -IntuneDevices @($script:intuneDevice, $duplicateIntune) -AutopilotDevices @() -RunId 'r1'
 
@@ -94,6 +96,69 @@ Describe 'Resolve-ScrappedDeviceRecords' {
             -IntuneDevices @($script:intuneDevice) -AutopilotDevices @($script:autopilotDevice) -RunId 'r1'
 
         $result[0].MatchStatus | Should -Be 'NotFound'
+    }
+
+    It 'protects explicitly scrapped serials by <Protection>' -TestCases @(
+        @{ Protection = 'Serial' }, @{ Protection = 'EntraId' }, @{ Protection = 'DeviceId' }, @{ Protection = 'Name' }
+    ) {
+        param($Protection)
+        $parameters = @{}
+        switch ($Protection) {
+            Serial { $parameters.ProtectedSerialNumbers = @('5CD3271HSD') }
+            EntraId { $parameters.ProtectedEntraObjectIds = @('entra1') }
+            DeviceId { $parameters.ProtectedEntraDeviceIds = @('aad-device-1') }
+            Name { $parameters.ProtectedNamePatterns = @('SCRAPPED-*') }
+        }
+        $result = Resolve-ScrappedDeviceRecords -SerialNumbers @('5CD3271HSD') -EntraDevices @($script:entraDevice) `
+            -IntuneDevices @($script:intuneDevice) -AutopilotDevices @($script:autopilotDevice) -RunId r1 @parameters
+        $result[0].MatchStatus | Should -Be 'Excluded'
+        $result[0].AmbiguityReason | Should -Be 'ProtectedDevice'
+        $result[0].IntuneManagedDeviceId | Should -BeNullOrEmpty
+    }
+
+    It 'excludes unsupported or missing scrapped platforms: <OS>' -TestCases @(
+        @{ OS = 'Windows Server' }, @{ OS = 'macOS' }, @{ OS = '' }
+    ) {
+        param($OS)
+        $intune = [PSCustomObject]@{
+            Id = 'intune1'; AzureAdDeviceId = 'aad-device-1'; SerialNumber = '5CD3271HSD'
+            DeviceName = 'SCRAPPED-01'; OperatingSystem = $OS
+        }
+        $result = Resolve-ScrappedDeviceRecords -SerialNumbers @('5CD3271HSD') -EntraDevices @($script:entraDevice) `
+            -IntuneDevices @($intune) -AutopilotDevices @($script:autopilotDevice) -RunId r1
+        $result[0].MatchStatus | Should -Be 'Excluded'
+        $result[0].AmbiguityReason | Should -Be 'UnsupportedOrMissingPlatform'
+    }
+
+    It 'protects an Autopilot-only identity using its Entra device reference' {
+        $result = Resolve-ScrappedDeviceRecords -SerialNumbers @('5CD3271HSD') -EntraDevices @() `
+            -IntuneDevices @() -AutopilotDevices @($script:autopilotDevice) -RunId r1 `
+            -ProtectedEntraDeviceIds @('aad-device-1')
+        $result[0].MatchStatus | Should -Be 'Excluded'
+        $result[0].AmbiguityReason | Should -Be 'ProtectedDevice'
+        $result[0].AutopilotIdentityId | Should -BeNullOrEmpty
+    }
+
+    It 'does not trust serial matches over conflicting stable identifiers' {
+        $intune = [PSCustomObject]@{
+            Id = 'another'; AzureAdDeviceId = 'aad-device-1'; SerialNumber = '5CD3271HSD'
+            DeviceName = 'SCRAPPED-01'; OperatingSystem = 'Windows'
+        }
+        $result = Resolve-ScrappedDeviceRecords -SerialNumbers @('5CD3271HSD') -EntraDevices @($script:entraDevice) `
+            -IntuneDevices @($intune) -AutopilotDevices @($script:autopilotDevice) -RunId r1
+        $result[0].AmbiguityReason | Should -Be 'ConflictingIdentifiers'
+        $result[0].AutopilotIdentityId | Should -BeNullOrEmpty
+    }
+
+    It 'does not bypass an Intune prerequisite whose serial differs from its Autopilot reference' {
+        $intune = [PSCustomObject]@{
+            Id = 'intune1'; AzureAdDeviceId = 'aad-device-1'; SerialNumber = 'ANOTHER-SERIAL'
+            DeviceName = 'SCRAPPED-01'; OperatingSystem = 'Windows'
+        }
+        $result = Resolve-ScrappedDeviceRecords -SerialNumbers @('5CD3271HSD') -EntraDevices @($script:entraDevice) `
+            -IntuneDevices @($intune) -AutopilotDevices @($script:autopilotDevice) -RunId r1
+        $result[0].MatchStatus | Should -Be 'Excluded'
+        $result[0].AmbiguityReason | Should -Be 'ConflictingIdentifiers'
     }
 }
 Describe 'Show-ScrappedDeviceSummary' {
@@ -114,9 +179,42 @@ Describe 'Show-ScrappedDeviceSummary' {
         Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Matched serial numbers:        1' }
         Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Autopilot records:             1' }
         Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Intune managed devices:        1' }
-        Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Entra device objects:          1' }
+        Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Entra objects to remove:       1' }
         Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Ambiguous serial numbers:      1' }
         Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Serial numbers not found:      1' }
+        Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
+            $Object -eq '  Total DELETE operations:       3'
+        }
+        Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
+            $Object -eq '  Serials with DELETE targets:   1'
+        }
+    }
+
+    It 'counts validated Entra-only matches as destructive targets' {
+        $record = [PSCustomObject]@{
+            NormalizedSerialNumber = 'serial1'; MatchStatus = 'Matched'
+            AutopilotIdentityId = $null; IntuneManagedDeviceId = $null; EntraObjectId = 'entra1'
+        }
+        Mock Write-Host -ModuleName StaleDeviceCleanup { }
+        Show-ScrappedDeviceSummary -ScrappedDeviceRecords @($record) -OutputPath $TestDrive `
+            -TenantId tenant1 -Mode Interactive -Simulation $true -DeletionTransport JsonBatch
+        Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
+            $Object -eq '  Serials with DELETE targets:   1'
+        }
+        Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
+            $Object -eq '  Entra objects to remove:       1'
+        }
+        Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
+            $Object -eq 'Mode: Interactive; WhatIf: True; transport: JsonBatch'
+        }
+    }
+
+    It 'supports an empty scrapped report' {
+        Mock Write-Host -ModuleName StaleDeviceCleanup { }
+        Show-ScrappedDeviceSummary -ScrappedDeviceRecords @() -OutputPath $TestDrive
+        Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
+            $Object -eq '  Total DELETE operations:       0'
+        }
     }
 }
 Describe 'Remove-IntuneManagedDeviceRecord' {
@@ -130,6 +228,17 @@ Describe 'Remove-IntuneManagedDeviceRecord' {
         Mock -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -MockWith { }
         Remove-IntuneManagedDeviceRecord -ManagedDeviceId 'intune1' -WhatIf | Out-Null
         Assert-MockCalled -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 0
+    }
+
+    It 'treats an already absent managed device as a completed removal' {
+        Mock -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -MockWith {
+            throw [System.Exception]::new('Request_ResourceNotFound')
+        }
+        $alreadyRemoved = $false
+        $result = Remove-IntuneManagedDeviceRecord -ManagedDeviceId 'intune-gone' -AlreadyRemoved ([ref]$alreadyRemoved) -Confirm:$false
+
+        $result | Should -BeTrue
+        $alreadyRemoved | Should -BeTrue
     }
 }
 
@@ -168,6 +277,16 @@ Describe 'Invoke-ScrappedDeviceRemoval' {
         Mock -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -MockWith { }
         Mock -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -MockWith { }
         Mock -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -MockWith { }
+        Mock -CommandName Start-Sleep -ModuleName StaleDeviceCleanup -MockWith { }
+        Mock Get-MgContext -ModuleName StaleDeviceCleanup {
+            [PSCustomObject]@{
+                TenantId = 'tenant1'; AuthType = 'Delegated'; Environment = 'Global'
+                Scopes = @('Directory.AccessAsUser.All', 'DeviceManagementManagedDevices.ReadWrite.All', 'DeviceManagementServiceConfig.ReadWrite.All')
+            }
+        }
+        Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup {
+            [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::NotFound)
+        }
     }
 
     AfterEach {
@@ -175,15 +294,16 @@ Describe 'Invoke-ScrappedDeviceRemoval' {
     }
 
     It 'submits an Autopilot identity and continues for a successful response' {
-        $global:scrappedRemovalOrder = [System.Collections.Generic.List[string]]::new()
+        $script:scrappedRemovalOrder = [System.Collections.Generic.List[string]]::new()
         Mock -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -MockWith {
-            $global:scrappedRemovalOrder.Add('Intune')
+            $script:scrappedRemovalOrder.Add('Intune')
         }
         Mock -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -MockWith {
-            $global:scrappedRemovalOrder.Add('Autopilot')
+            $script:scrappedRemovalOrder.Add('Autopilot')
         }
+        Mock Remove-MgDevice -ModuleName StaleDeviceCleanup { $script:scrappedRemovalOrder.Add('Entra') }
         $record = New-TestScrappedRecord
-        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords @($record) -LogPath $script:testLogPath
+        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords @($record) -LogPath $script:testLogPath -Confirm:$false
 
         $record.AutopilotRemovalStatus | Should -Be 'RemovalSubmitted'
         $record.IntuneRemovalStatus | Should -Be 'Removed'
@@ -191,13 +311,29 @@ Describe 'Invoke-ScrappedDeviceRemoval' {
         Assert-MockCalled -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $WindowsAutopilotDeviceIdentityId -eq 'ap1' }
         Assert-MockCalled -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 1
         Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 1
-        $global:scrappedRemovalOrder | Should -Be @('Intune', 'Autopilot')
-        Remove-Variable -Name scrappedRemovalOrder -Scope Global -ErrorAction SilentlyContinue
+        $script:scrappedRemovalOrder | Should -Be @('Intune', 'Autopilot', 'Entra')
+        Remove-Variable -Name scrappedRemovalOrder -Scope Script -ErrorAction SilentlyContinue
+    }
+
+    It 'handles mandatory verification without an optional log path: <Readback>' -TestCases @(
+        @{ Readback = 'NotFound'; EntraStatus = 'Removed' },
+        @{ Readback = 'Forbidden'; EntraStatus = 'BlockedDependency' }
+    ) {
+        param($Readback, $EntraStatus)
+        $script:noLogReadback = [System.Net.HttpStatusCode]::$Readback
+        Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup {
+            [System.Net.Http.HttpResponseMessage]::new($script:noLogReadback)
+        }
+        $record = New-TestScrappedRecord
+        { Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords @($record) -Confirm:$false } | Should -Not -Throw
+        $record.EntraRemovalStatus | Should -Be $EntraStatus
+        if ($Readback -eq 'NotFound') { $record.AutopilotVerificationStatus | Should -Be 'VerifiedAbsent' }
+        else { $record.ErrorMessage | Should -Match 'HTTP 403' }
     }
 
     It 'never touches Ambiguous or NotFound records' {
         $records = @((New-TestScrappedRecord -MatchStatus 'Ambiguous'), (New-TestScrappedRecord -MatchStatus 'NotFound' -AutopilotIdentityId $null -IntuneManagedDeviceId $null -EntraObjectId $null))
-        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords $records -LogPath $script:testLogPath
+        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords $records -LogPath $script:testLogPath -Confirm:$false
 
         Assert-MockCalled -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 0
         Assert-MockCalled -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 0
@@ -209,12 +345,12 @@ Describe 'Invoke-ScrappedDeviceRemoval' {
             throw [System.Exception]::new('Service rejected deletion.')
         }
         $record = New-TestScrappedRecord
-        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords @($record) -LogPath $script:testLogPath
+        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords @($record) -LogPath $script:testLogPath -Confirm:$false
 
         $record.AutopilotRemovalStatus | Should -Be 'RemovalFailed'
         $record.IntuneRemovalStatus | Should -Be 'Removed'
-        $record.EntraRemovalStatus | Should -Be 'SkippedAutopilotSubmissionFailed'
-        $record.ErrorMessage | Should -Be 'Service rejected deletion.'
+        $record.EntraRemovalStatus | Should -Be 'BlockedDependency'
+        $record.ErrorMessage | Should -Match 'Service rejected deletion.'
         Assert-MockCalled -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 1
         Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
     }
@@ -225,11 +361,11 @@ Describe 'Invoke-ScrappedDeviceRemoval' {
         }
         $record = New-TestScrappedRecord
 
-        { Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords @($record) -LogPath $script:testLogPath } | Should -Not -Throw
+        { Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords @($record) -LogPath $script:testLogPath -Confirm:$false } | Should -Not -Throw
 
         $record.IntuneRemovalStatus | Should -Be 'Removed'
         $record.AutopilotRemovalStatus | Should -Be 'RemovalFailed'
-        $record.EntraRemovalStatus | Should -Be 'SkippedAutopilotSubmissionFailed'
+        $record.EntraRemovalStatus | Should -Be 'BlockedDependency'
         $record.ErrorMessage | Should -Match '503 Service Unavailable'
         Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
     }
@@ -241,12 +377,12 @@ Describe 'Invoke-ScrappedDeviceRemoval' {
         $acceptedRecord = New-TestScrappedRecord -AutopilotIdentityId 'ap1' -IntuneManagedDeviceId $null -EntraObjectId 'entra1' -InputSerialNumber 'SERIAL-ACCEPTED'
         $missingRecord = New-TestScrappedRecord -AutopilotIdentityId 'ap2' -IntuneManagedDeviceId $null -EntraObjectId 'entra2' -InputSerialNumber 'SERIAL-MISSING'
 
-        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords @($acceptedRecord, $missingRecord) -LogPath $script:testLogPath
+        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords @($acceptedRecord, $missingRecord) -LogPath $script:testLogPath -Confirm:$false
 
         $acceptedRecord.AutopilotRemovalStatus | Should -Be 'RemovalSubmitted'
         $acceptedRecord.EntraRemovalStatus | Should -Be 'Removed'
         $missingRecord.AutopilotRemovalStatus | Should -Be 'RemovalFailed'
-        $missingRecord.EntraRemovalStatus | Should -Be 'SkippedAutopilotSubmissionFailed'
+        $missingRecord.EntraRemovalStatus | Should -Be 'BlockedDependency'
         Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $DeviceId -eq 'entra1' }
     }
 
@@ -256,10 +392,10 @@ Describe 'Invoke-ScrappedDeviceRemoval' {
         }
         $record = New-TestScrappedRecord -IntuneManagedDeviceId $null
 
-        { Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords @($record) -LogPath $script:testLogPath } | Should -Not -Throw
+        { Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords @($record) -LogPath $script:testLogPath -Confirm:$false } | Should -Not -Throw
 
         $record.AutopilotRemovalStatus | Should -Be 'RemovalFailed'
-        $record.EntraRemovalStatus | Should -Be 'SkippedAutopilotSubmissionFailed'
+        $record.EntraRemovalStatus | Should -Be 'BlockedDependency'
         Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
     }
 
@@ -270,11 +406,113 @@ Describe 'Invoke-ScrappedDeviceRemoval' {
             (New-TestScrappedRecord -IntuneManagedDeviceId $null -EntraObjectId 'entra1')
         )
 
-        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords $records -LogPath $script:testLogPath
+        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords $records -LogPath $script:testLogPath -Confirm:$false
 
         Assert-MockCalled -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 1
         Assert-MockCalled -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 1
         Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 1
+    }
+
+    It 'removes each unique batch target once and copies its outcome to duplicate rows' {
+        $records = @(
+            (New-TestScrappedRecord -AutopilotIdentityId $null -IntuneManagedDeviceId 'intune1' -EntraObjectId $null),
+            (New-TestScrappedRecord -AutopilotIdentityId $null -IntuneManagedDeviceId 'INTUNE1' -EntraObjectId $null),
+            (New-TestScrappedRecord -AutopilotIdentityId $null -IntuneManagedDeviceId $null -EntraObjectId $null)
+        )
+
+        Invoke-ScrappedDeviceBatchRemoval -ScrappedDeviceRecords $records -TargetType Intune -LogPath $script:testLogPath -Confirm:$false
+
+        $records[0].IntuneRemovalStatus | Should -Be 'Removed'
+        $records[1].IntuneRemovalStatus | Should -Be 'Removed'
+        $records[2].IntuneRemovalStatus | Should -Be 'NotApplicable'
+        Assert-MockCalled -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 1
+
+        { Invoke-ScrappedDeviceBatchRemoval -ScrappedDeviceRecords @() -TargetType Entra -LogPath $script:testLogPath -Confirm:$false } | Should -Throw
+        Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+    }
+
+    It 'retries throttled batch items and records individual exhaustion without aborting later targets' {
+        $global:scrappedRetryAttempts = 0
+        Mock -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -MockWith {
+            if ($ManagedDeviceId -eq 'intune-throttled') {
+                $global:scrappedRetryAttempts++
+                if ($global:scrappedRetryAttempts -lt 3) {
+                    throw [System.Exception]::new('429 Too Many Requests')
+                }
+            }
+            if ($ManagedDeviceId -eq 'intune-exhausted') {
+                throw [System.Exception]::new('503 Service Unavailable')
+            }
+        }
+        $throttledRecord = New-TestScrappedRecord -AutopilotIdentityId $null -IntuneManagedDeviceId 'intune-throttled' -EntraObjectId $null
+        $failedRecord = New-TestScrappedRecord -AutopilotIdentityId $null -IntuneManagedDeviceId 'intune-exhausted' -EntraObjectId $null -InputSerialNumber 'SERIAL-FAILED'
+        $laterRecord = New-TestScrappedRecord -AutopilotIdentityId $null -IntuneManagedDeviceId 'intune-later' -EntraObjectId $null -InputSerialNumber 'SERIAL-LATER'
+
+        Invoke-ScrappedDeviceBatchRemoval -ScrappedDeviceRecords @($throttledRecord, $failedRecord, $laterRecord) -TargetType Intune -LogPath $script:testLogPath -Confirm:$false
+
+        $throttledRecord.IntuneRemovalStatus | Should -Be 'Removed'
+        $failedRecord.IntuneRemovalStatus | Should -Be 'RemovalFailed'
+        $failedRecord.ErrorMessage | Should -Match '503 Service Unavailable'
+        $laterRecord.IntuneRemovalStatus | Should -Be 'Removed'
+        Assert-MockCalled -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 9
+        Remove-Variable -Name scrappedRetryAttempts -Scope Global -ErrorAction SilentlyContinue
+    }
+
+    It 'fails closed for a missing Autopilot result and blocks the associated Entra target' {
+        Mock -CommandName Submit-WindowsAutopilotIdentityRemoval -ModuleName StaleDeviceCleanup -MockWith { @() }
+        $record = New-TestScrappedRecord -IntuneManagedDeviceId $null
+
+        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords @($record) -LogPath $script:testLogPath -Confirm:$false
+
+        $record.AutopilotRemovalStatus | Should -Be 'RemovalFailed'
+        $record.EntraRemovalStatus | Should -Be 'BlockedDependency'
+        $record.ErrorMessage | Should -Match 'was not submitted'
+        Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+    }
+
+    It 'blocks Entra removal when any Autopilot identity for the serial fails' {
+        Mock -CommandName Submit-WindowsAutopilotIdentityRemoval -ModuleName StaleDeviceCleanup -MockWith {
+            @(
+                [PSCustomObject]@{ IdentityId = 'ap1'; Status = 'RemovalSubmitted'; ErrorMessage = $null },
+                [PSCustomObject]@{ IdentityId = 'ap2'; Status = 'RemovalFailed'; ErrorMessage = 'Identity rejected' }
+            )
+        }
+        $firstIdentityRecord = New-TestScrappedRecord -AutopilotIdentityId 'ap1' -IntuneManagedDeviceId $null -EntraObjectId $null
+        $secondIdentityRecord = New-TestScrappedRecord -AutopilotIdentityId 'ap2' -IntuneManagedDeviceId $null -EntraObjectId $null
+        $entraRecord = New-TestScrappedRecord -AutopilotIdentityId 'ap1' -IntuneManagedDeviceId $null -EntraObjectId 'entra1'
+
+        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords @($firstIdentityRecord, $secondIdentityRecord, $entraRecord) `
+            -LogPath $script:testLogPath -Confirm:$false
+
+        $firstIdentityRecord.AutopilotRemovalStatus | Should -Be 'RemovalSubmitted'
+        $secondIdentityRecord.AutopilotRemovalStatus | Should -Be 'RemovalFailed'
+        $entraRecord.EntraRemovalStatus | Should -Be 'BlockedDependency'
+        Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+    }
+
+    It 'preserves already-removed Autopilot outcomes and verifies absence before Entra deletion' {
+        Mock -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -MockWith {
+            throw [System.Exception]::new('ZtdDeviceAlreadyDeleted')
+        }
+        $record = New-TestScrappedRecord -IntuneManagedDeviceId $null
+
+        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords @($record) -LogPath $script:testLogPath -Confirm:$false
+
+        $record.AutopilotRemovalStatus | Should -Be 'AlreadyRemoved'
+        $record.EntraRemovalStatus | Should -Be 'Removed'
+        Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 1
+    }
+
+    It 'removes every validated Entra object without an Autopilot dependency' {
+        $records = @(
+            (New-TestScrappedRecord -AutopilotIdentityId $null -IntuneManagedDeviceId $null -EntraObjectId 'entra-one'),
+            (New-TestScrappedRecord -AutopilotIdentityId $null -IntuneManagedDeviceId $null -EntraObjectId 'entra-two' -InputSerialNumber 'SERIAL-TWO')
+        )
+
+        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords $records -LogPath $script:testLogPath -Confirm:$false
+
+        @($records | Where-Object EntraRemovalStatus -ne 'Removed').Count | Should -Be 0
+        Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 2
     }
 
     It 'does not call any Graph cmdlet under -WhatIf' {
@@ -287,5 +525,17 @@ Describe 'Invoke-ScrappedDeviceRemoval' {
         Assert-MockCalled -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 0
         Assert-MockCalled -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 0
         Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+    }
+
+    It 'blocks all related Autopilot rows when Intune removal fails' {
+        Mock Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup { throw 'Denied Intune' }
+        $records = @(
+            (New-TestScrappedRecord),
+            (New-TestScrappedRecord -IntuneManagedDeviceId $null -EntraObjectId 'entra2')
+        )
+        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords $records -LogPath $script:testLogPath -Confirm:$false
+        @($records | Where-Object AutopilotRemovalStatus -eq 'BlockedDependency').Count | Should -Be 2
+        Assert-MockCalled Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 0
+        Assert-MockCalled Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
     }
 }

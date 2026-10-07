@@ -6,9 +6,14 @@
 
     DaysInactive               = 180
     Mode                       = 'Audit'
+    DeletionTransport          = 'Individual' # Opt in to JsonBatch only after lab validation.
+    BatchSize                  = 20
+    VerifyDeletion             = $false # Optional bounded read-back with JsonBatch.
     OutputPath                 = '.\output'
     TenantId                   = ''
     ProtectedDeviceIdFile      = '.\config\ProtectedDevices.example.csv'
     ProtectedDeviceNamePattern = @('BREAKGLASS-*', 'PAW-*', 'ADMIN-*', 'KIOSK-CRITICAL-*')
-    ScrappedDeviceCsvPath      = '.\src\SkrotadeDatorer.csv'
+    # For scrapped cleanup use a separate invocation with -ScrappedDevices,
+    # omitting DaysInactive. Default input: .\src\scrappeddevices.csv.
+    # Optional -ScrappedDeviceCsvPath override; strict SerialNumber header.
 }
