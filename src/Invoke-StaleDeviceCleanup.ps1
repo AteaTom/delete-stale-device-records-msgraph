@@ -2,8 +2,8 @@
 <#
     .SYNOPSIS
     Identifies, reports on, and (with explicit confirmation) removes stale
-    Microsoft Entra ID device objects and their associated Windows Autopilot
-    registrations.
+    standalone Microsoft Entra ID device objects. Explicit scrapped hardware
+    cleanup deregisters Intune and Windows Autopilot records separately.
 
     .DESCRIPTION
     Discovers Windows, iOS, and Android device records in Microsoft Entra ID,
@@ -58,20 +58,29 @@
 
     .PARAMETER ScrappedDeviceCsvPath
     Path to a recurring CSV/text file containing one physically scrapped
-    device serial number per line (header optional). Every serial number that
-    matches a Windows Autopilot identity, Intune managed device, and/or Entra
-    device object is submitted for removal from the applicable systems,
-    independent of activity, disabled-state, or platform. Intune records are
-    removed first, then the Autopilot identity is submitted through the
-    supported identity DELETE endpoint. A successful submission permits the
-    related Entra cleanup without waiting for Autopilot portal synchronization.
-    Ambiguous (duplicate serial) or unmatched
+    device serial number per line (header optional). Unambiguous, unprotected
+    client hardware may have Intune records removed, then Windows Autopilot
+    identities submitted for removal only after required Intune success.
+    Entra objects remain for manual review. Activity does not determine
+    explicit hardware retirement; platform and protection controls still apply.
+    Ambiguous, excluded or unmatched
     entries are reported but never acted on. Duplicate rows in the input file
     are ignored case-insensitively and counted in the pre-deletion summary.
     Subject to the same Mode/
     -WhatIf/-ConfirmDeletion gating as the stale-device workflow; unlike the
     stale-device workflow, this is the one path that also removes Intune
     managed-device records.
+
+    .PARAMETER DeletionTransport
+    Individual (default) uses SDK deletion cmdlets. JsonBatch is an opt-in
+    transport with tenant-bound plans, per-object results and durable journals.
+
+    .PARAMETER BatchSize
+    Maximum independent operations per JSON batch, from 1 through 20.
+
+    .PARAMETER VerifyDeletion
+    Optional bounded read-back of successful IDs, supported only with JsonBatch.
+    Observed absence is recorded separately from DELETE acceptance.
 
     .EXAMPLE
     .\Invoke-StaleDeviceCleanup.ps1 -Mode Audit -DaysInactive 180
@@ -117,31 +126,54 @@ param(
 
     [switch]$AllowOnPremisesSyncedDeletion,
 
-    [string]$ScrappedDeviceCsvPath
+    [string]$ScrappedDeviceCsvPath,
+
+    [ValidateSet('Individual', 'JsonBatch')]
+    [string]$DeletionTransport = 'Individual',
+
+    [ValidateRange(1, 20)]
+    [int]$BatchSize = 20,
+
+    [switch]$VerifyDeletion
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.0.2'
-$requiredModuleVersion = [version]'1.0.2'
+if ($VerifyDeletion -and $DeletionTransport -ne 'JsonBatch') {
+    throw '-VerifyDeletion requires -DeletionTransport JsonBatch.'
+}
+
+$scriptVersion = '1.1.0'
+$requiredModuleVersion = [version]'1.1.0'
 $modulePath = Join-Path -Path $PSScriptRoot -ChildPath 'StaleDeviceCleanup.psd1'
 # Avoid -Force when the module is already loaded (e.g. under Pester with mocks
 # injected into the existing module scope) so mocked commands are preserved.
 $loadedModule = Get-Module -Name 'StaleDeviceCleanup'
 $removeAutopilotCommand = Get-Command -Name 'Remove-WindowsAutopilotRecord' -ErrorAction SilentlyContinue
+$newRunSummaryCommand = Get-Command -Name 'New-RunSummary' -ErrorAction SilentlyContinue
 $getScrappedSerialsCommand = Get-Command -Name 'Get-ScrappedDeviceSerialNumbers' -ErrorAction SilentlyContinue
 $showScrappedSummaryCommand = Get-Command -Name 'Show-ScrappedDeviceSummary' -ErrorAction SilentlyContinue
+$showCleanupSummaryCommand = Get-Command -Name 'Show-CleanupSummary' -ErrorAction SilentlyContinue
 $submitAutopilotIdentityCommand = Get-Command -Name 'Submit-WindowsAutopilotIdentityRemoval' -ErrorAction SilentlyContinue
+$scrappedBatchRemovalCommand = Get-Command -Name 'Invoke-ScrappedDeviceBatchRemoval' -ErrorAction SilentlyContinue
+$batchCommand = Get-Command -Name 'Invoke-DeviceDeletionPlan' -ErrorAction SilentlyContinue
 $moduleIsCurrent = $loadedModule `
     -and $loadedModule.Version -eq $requiredModuleVersion `
     -and $removeAutopilotCommand `
     -and $removeAutopilotCommand.Parameters.ContainsKey('SuppressErrorLog') `
+    -and $newRunSummaryCommand `
+    -and $newRunSummaryCommand.Parameters.ContainsKey('AllowOnPremisesSyncedDeletion') `
     -and $getScrappedSerialsCommand `
     -and $getScrappedSerialsCommand.Parameters.ContainsKey('Statistics') `
     -and $showScrappedSummaryCommand `
     -and $showScrappedSummaryCommand.Parameters.ContainsKey('CsvDuplicateCount') `
-    -and $submitAutopilotIdentityCommand
+    -and $showScrappedSummaryCommand.Parameters.ContainsKey('Simulation') `
+    -and $showCleanupSummaryCommand `
+    -and $showCleanupSummaryCommand.Parameters.ContainsKey('Simulation') `
+    -and $submitAutopilotIdentityCommand `
+    -and $scrappedBatchRemovalCommand `
+    -and $batchCommand
 if (-not $moduleIsCurrent) {
     Import-Module -Name $modulePath -Force
 }
@@ -158,6 +190,9 @@ $allEvaluatedDevices = @()
 $scrappedDeviceRecords = @()
 $cutoffDateUtc = (Get-Date).ToUniversalTime().AddDays(-$DaysInactive)
 $permissionCheck = [PSCustomObject]@{ HasAllRequired = $false; MissingScopes = @(); GrantedScopes = @() }
+$deletionPlan = $null
+$approvalHash = ''
+$journalPath = Join-Path $resolvedOutputPath 'DeletionJournal.jsonl'
 
 try {
     Write-CleanupLog -Message "Invoke-StaleDeviceCleanup starting. Version=$scriptVersion PSVersion=$($PSVersionTable.PSVersion) Mode=$Mode DaysInactive=$DaysInactive WhatIf=$([bool]$WhatIfPreference) RunId=$runId" -Level INFO -LogPath $logPath
@@ -171,12 +206,15 @@ try {
 
     # Audit mode only ever requests read scopes. Destructive modes request read/write.
     $readScopes = @('Device.Read.All', 'DeviceManagementManagedDevices.Read.All', 'DeviceManagementServiceConfig.Read.All')
-    $writeScopes = @('Device.ReadWrite.All', 'DeviceManagementServiceConfig.ReadWrite.All')
+    $writeScopes = @('Directory.AccessAsUser.All')
     # Intune managed-device records are only ever removed via the scrapped-device workflow.
-    if ($ScrappedDeviceCsvPath) { $writeScopes += 'DeviceManagementManagedDevices.ReadWrite.All' }
+    if ($ScrappedDeviceCsvPath) {
+        $writeScopes = @('DeviceManagementManagedDevices.ReadWrite.All', 'DeviceManagementServiceConfig.ReadWrite.All')
+    }
     $requestedScopes = if ($Mode -eq 'Audit') { $readScopes } else { $readScopes + $writeScopes }
 
-    Connect-DeviceCleanupGraph -TenantId $TenantId -Scopes $requestedScopes -LogPath $logPath | Out-Null
+    $connectedContext = Connect-DeviceCleanupGraph -TenantId $TenantId -Scopes $requestedScopes -LogPath $logPath
+    Write-Host "Connected tenant: $($connectedContext.TenantId); authentication: $($connectedContext.AuthType)."
 
     $permissionCheck = Test-GraphPermissions -RequiredScopes $requestedScopes
     Write-CleanupLog -Message "Granted scopes: $($permissionCheck.GrantedScopes -join ', ')" -Level INFO -LogPath $logPath
@@ -223,7 +261,10 @@ try {
         $scrappedSerialNumbers = Get-ScrappedDeviceSerialNumbers -Path $ScrappedDeviceCsvPath -Statistics ([ref]$scrappedCsvStatistics)
         Write-CleanupLog -Message "Loaded $($scrappedSerialNumbers.Count) unique scrapped device serial number(s) from '$ScrappedDeviceCsvPath'; ignored $($scrappedCsvStatistics.DuplicateRowCount) duplicate CSV row(s)." -Level INFO -LogPath $logPath
         $scrappedDeviceRecords = Resolve-ScrappedDeviceRecords -SerialNumbers $scrappedSerialNumbers -EntraDevices $entraDevices `
-            -IntuneDevices $intuneDevices -AutopilotDevices $autopilotDevices -RunId $runId
+            -IntuneDevices $intuneDevices -AutopilotDevices $autopilotDevices -RunId $runId `
+            -ProtectedEntraObjectIds $protectedEntraObjectIds -ProtectedEntraDeviceIds $protectedEntraDeviceIds `
+            -ProtectedSerialNumbers $protectedSerialNumbers -ProtectedDeviceNames $protectedDeviceNames `
+            -ProtectedNamePatterns $ProtectedDeviceNamePattern
         $scrappedMatchedRecords = @($scrappedDeviceRecords | Where-Object MatchStatus -eq 'Matched')
         $scrappedMatched = @($scrappedMatchedRecords | Select-Object -ExpandProperty NormalizedSerialNumber -Unique).Count
         $scrappedAmbiguous = @($scrappedDeviceRecords | Where-Object MatchStatus -eq 'Ambiguous' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique).Count
@@ -231,11 +272,18 @@ try {
         $scrappedAutopilotTargets = @($scrappedMatchedRecords | Where-Object AutopilotIdentityId | Select-Object -ExpandProperty AutopilotIdentityId -Unique).Count
         $scrappedIntuneTargets = @($scrappedMatchedRecords | Where-Object IntuneManagedDeviceId | Select-Object -ExpandProperty IntuneManagedDeviceId -Unique).Count
         $scrappedEntraTargets = @($scrappedMatchedRecords | Where-Object EntraObjectId | Select-Object -ExpandProperty EntraObjectId -Unique).Count
-        Write-CleanupLog -Message "Scrapped device resolution: InputSerials=$($scrappedSerialNumbers.Count) MatchedSerials=$scrappedMatched AmbiguousSerials=$scrappedAmbiguous NotFoundSerials=$scrappedNotFound; AutopilotTargets=$scrappedAutopilotTargets IntuneTargets=$scrappedIntuneTargets EntraTargets=$scrappedEntraTargets." -Level INFO -LogPath $logPath
+        Write-CleanupLog -Message "Scrapped device resolution: InputSerials=$($scrappedSerialNumbers.Count) MatchedSerials=$scrappedMatched AmbiguousSerials=$scrappedAmbiguous NotFoundSerials=$scrappedNotFound; AutopilotTargets=$scrappedAutopilotTargets IntuneTargets=$scrappedIntuneTargets EntraReview=$scrappedEntraTargets." -Level INFO -LogPath $logPath
 
         Export-ReportCsv -InputObject $scrappedDeviceRecords -Path (Join-Path $resolvedOutputPath 'ScrappedDeviceResults.csv')
         Show-ScrappedDeviceSummary -ScrappedDeviceRecords $scrappedDeviceRecords -OutputPath $resolvedOutputPath `
-            -CsvDuplicateCount $scrappedCsvStatistics.DuplicateRowCount
+            -CsvDuplicateCount $scrappedCsvStatistics.DuplicateRowCount -TenantId $connectedContext.TenantId `
+            -Mode $Mode -Simulation ([bool]$WhatIfPreference) -DeletionTransport $DeletionTransport
+        if ($DeletionTransport -eq 'JsonBatch') {
+            $deletionPlan = New-DeviceDeletionPlan -TenantId $connectedContext.TenantId -RunId $runId -Workflow Scrapped -Records $scrappedDeviceRecords
+            $deletionPlan | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $resolvedOutputPath 'DeletionPlan.json') -Encoding utf8 -WhatIf:$false
+            $approvalHash = $deletionPlan.Hash
+            Write-Host "Tenant: $($deletionPlan.TenantId); unique operations: $($deletionPlan.Operations.Count); plan hash: $approvalHash"
+        }
 
         switch ($Mode) {
             'Audit' {
@@ -270,12 +318,28 @@ try {
             }
         }
 
-        Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords $scrappedDeviceRecords -LogPath $logPath -WhatIf:$WhatIfPreference
+        if ($DeletionTransport -eq 'JsonBatch') {
+            $results = @(Invoke-DeviceDeletionPlan -Plan $deletionPlan -ApprovalHash $approvalHash -Mode $Mode `
+                -ConfirmDeletion:$confirmationGranted -BatchSize $BatchSize -JournalPath $journalPath -LogPath $logPath `
+                -WhatIf:$WhatIfPreference -Confirm:$false -VerifyDeletion:$VerifyDeletion)
+            Set-DeviceDeletionResults -Workflow Scrapped -Records $scrappedDeviceRecords -Results $results
+        } else {
+            Assert-DeviceCleanupContext -TenantId $connectedContext.TenantId -RequiredScopes $requestedScopes
+            Invoke-ScrappedDeviceRemoval -ScrappedDeviceRecords $scrappedDeviceRecords -LogPath $logPath `
+                -ExpectedTenantId $connectedContext.TenantId -WhatIf:$WhatIfPreference -Confirm:$false
+        }
 
-        $scrappedSubmittedAutopilot = @($scrappedDeviceRecords | Where-Object { $_.AutopilotRemovalStatus -in 'RemovalSubmitted', 'AlreadyRemoved' -and $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId -Unique).Count
+        $scrappedSubmittedAutopilot = @($scrappedDeviceRecords | Where-Object { $_.AutopilotRemovalStatus -eq 'RemovalSubmitted' -and $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId -Unique).Count
+        $scrappedAlreadyRemovedAutopilot = @($scrappedDeviceRecords | Where-Object { $_.AutopilotRemovalStatus -eq 'AlreadyRemoved' -and $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId -Unique).Count
+        $scrappedFailedAutopilot = @($scrappedDeviceRecords | Where-Object { $_.AutopilotRemovalStatus -eq 'RemovalFailed' -and $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId -Unique).Count
         $scrappedRemovedIntune = @($scrappedDeviceRecords | Where-Object { $_.IntuneRemovalStatus -eq 'Removed' -and $_.IntuneManagedDeviceId } | Select-Object -ExpandProperty IntuneManagedDeviceId -Unique).Count
+        $scrappedAlreadyRemovedIntune = @($scrappedDeviceRecords | Where-Object { $_.IntuneRemovalStatus -eq 'AlreadyRemoved' -and $_.IntuneManagedDeviceId } | Select-Object -ExpandProperty IntuneManagedDeviceId -Unique).Count
+        $scrappedFailedIntune = @($scrappedDeviceRecords | Where-Object { $_.IntuneRemovalStatus -eq 'RemovalFailed' -and $_.IntuneManagedDeviceId } | Select-Object -ExpandProperty IntuneManagedDeviceId -Unique).Count
         $scrappedRemovedEntra = @($scrappedDeviceRecords | Where-Object { $_.EntraRemovalStatus -eq 'Removed' -and $_.EntraObjectId } | Select-Object -ExpandProperty EntraObjectId -Unique).Count
-        Write-CleanupLog -Message "Scrapped device removals completed: Autopilot submissions accepted=$scrappedSubmittedAutopilot; Intune removed=$scrappedRemovedIntune; Entra removed=$scrappedRemovedEntra." -Level INFO -LogPath $logPath
+        $scrappedAlreadyRemovedEntra = @($scrappedDeviceRecords | Where-Object { $_.EntraRemovalStatus -eq 'AlreadyRemoved' -and $_.EntraObjectId } | Select-Object -ExpandProperty EntraObjectId -Unique).Count
+        $scrappedFailedEntra = @($scrappedDeviceRecords | Where-Object { $_.EntraRemovalStatus -eq 'RemovalFailed' -and $_.EntraObjectId } | Select-Object -ExpandProperty EntraObjectId -Unique).Count
+        $scrappedBlockedEntra = @($scrappedDeviceRecords | Where-Object { $_.EntraRemovalStatus -eq 'SkippedAutopilotSubmissionFailed' -and $_.EntraObjectId } | Select-Object -ExpandProperty EntraObjectId -Unique).Count
+        Write-CleanupLog -Message "Scrapped device removals completed: Autopilot accepted=$scrappedSubmittedAutopilot, already absent=$scrappedAlreadyRemovedAutopilot, failed=$scrappedFailedAutopilot; Intune removed=$scrappedRemovedIntune, already absent=$scrappedAlreadyRemovedIntune, failed=$scrappedFailedIntune; Entra removed=$scrappedRemovedEntra, already absent=$scrappedAlreadyRemovedEntra, failed=$scrappedFailedEntra, blocked by Autopilot=$scrappedBlockedEntra." -Level INFO -LogPath $logPath
         Export-ReportCsv -InputObject $scrappedDeviceRecords -Path (Join-Path $resolvedOutputPath 'ScrappedDeviceResults.csv')
         if (@($scrappedDeviceRecords | Where-Object { $_.ErrorMessage }).Count -gt 0 -and $exitCode -eq 0) { $exitCode = 6 }
         return
@@ -294,7 +358,15 @@ try {
     Export-CleanupReports -AllEvaluatedDevices $allEvaluatedDevices -OutputPath $resolvedOutputPath
     Export-ReportCsv -InputObject $scrappedDeviceRecords -Path (Join-Path $resolvedOutputPath 'ScrappedDeviceResults.csv')
 
-    Show-CleanupSummary -EvaluatedDevices $allEvaluatedDevices -CutoffDateUtc $cutoffDateUtc -DaysInactive $DaysInactive -OutputPath $resolvedOutputPath
+    Show-CleanupSummary -EvaluatedDevices $allEvaluatedDevices -CutoffDateUtc $cutoffDateUtc -DaysInactive $DaysInactive `
+        -OutputPath $resolvedOutputPath -TenantId $connectedContext.TenantId -Mode $Mode `
+        -Simulation ([bool]$WhatIfPreference) -DeletionTransport $DeletionTransport
+    if ($DeletionTransport -eq 'JsonBatch') {
+        $deletionPlan = New-DeviceDeletionPlan -TenantId $connectedContext.TenantId -RunId $runId -Workflow Stale -Records $allEvaluatedDevices
+        $deletionPlan | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $resolvedOutputPath 'DeletionPlan.json') -Encoding utf8 -WhatIf:$false
+        $approvalHash = $deletionPlan.Hash
+        Write-Host "Tenant: $($deletionPlan.TenantId); unique operations: $($deletionPlan.Operations.Count); plan hash: $approvalHash"
+    }
 
     $shouldAttemptDeletion = $false
     switch ($Mode) {
@@ -332,37 +404,20 @@ try {
     if ($shouldAttemptDeletion -and $discoveryComplete) {
         $candidates = @($allEvaluatedDevices | Where-Object Decision -eq 'Candidate')
         $deletionErrors = 0
-        $autopilotCandidates = @($candidates | Where-Object {
-                $_.Platform -eq 'Windows' -and $_.AutopilotPresent -and $_.MatchConfidence -eq 'High'
-            })
-        $autopilotTargets = @($autopilotCandidates | ForEach-Object {
-                [PSCustomObject]@{ IdentityId = $_.AutopilotIdentityId; SerialNumber = $_.AutopilotSerialNumber }
-            })
-        $identityStates = @{}
-        foreach ($identityState in @(Submit-WindowsAutopilotIdentityRemoval -Targets $autopilotTargets -LogPath $logPath -WhatIf:$WhatIfPreference -Confirm:$false)) {
-            $identityStates[[string]$identityState.IdentityId] = $identityState
-        }
-
-        foreach ($candidate in $autopilotCandidates) {
-            $identityState = if ($identityStates.ContainsKey([string]$candidate.AutopilotIdentityId)) { $identityStates[[string]$candidate.AutopilotIdentityId] } else { $null }
-            if ($identityState -and $identityState.Status -in 'RemovalSubmitted', 'AlreadyRemoved', 'WhatIf') {
-                $candidate.AutopilotRemovalStatus = $identityState.Status
-            } else {
-                $candidate.AutopilotRemovalStatus = 'RemovalFailed'
-                $candidate.ErrorMessage = if ($identityState -and $identityState.ErrorMessage) { $identityState.ErrorMessage } else { 'Autopilot identity removal was not submitted.' }
-                Write-CleanupLog -Message "Stale-device Autopilot identity removal was not accepted for identity '$($candidate.AutopilotIdentityId)' and Entra object '$($candidate.EntraObjectId)': $($candidate.ErrorMessage)" -Level ERROR -LogPath $logPath
-                $deletionErrors++
-            }
-        }
-
-        foreach ($candidate in $candidates) {
-            try {
-                if (-not $candidate.AutopilotPresent) {
+        if ($DeletionTransport -eq 'JsonBatch') {
+            $results = @(Invoke-DeviceDeletionPlan -Plan $deletionPlan -ApprovalHash $approvalHash -Mode $Mode `
+                -ConfirmDeletion:$confirmationGranted -BatchSize $BatchSize -JournalPath $journalPath -LogPath $logPath `
+                -WhatIf:$WhatIfPreference -Confirm:$false -VerifyDeletion:$VerifyDeletion)
+            Set-DeviceDeletionResults -Workflow Stale -Records $allEvaluatedDevices -Results $results
+            $deletionErrors = @($results | Where-Object { $_.Status -in 'RemovalFailed', 'OutcomeUnknown', 'BlockedDependency' }).Count
+        } else {
+            foreach ($candidate in $candidates) {
+                try {
+                    Assert-DeviceCleanupContext -TenantId $connectedContext.TenantId -RequiredScopes $requestedScopes
+                    if ($candidate.AutopilotPresent -or $candidate.EntraAction -ne 'Remove') {
+                        throw 'Candidate violates the standalone Entra removal policy.'
+                    }
                     $candidate.AutopilotRemovalStatus = 'NotApplicable'
-                }
-
-                $autopilotAccepted = -not $candidate.AutopilotPresent -or $candidate.AutopilotRemovalStatus -in 'RemovalSubmitted', 'WhatIf'
-                if ($autopilotAccepted -and $candidate.EntraAction -eq 'Remove') {
                     $entraRemoved = Remove-EntraDeviceRecord -EntraObjectId $candidate.EntraObjectId -LogPath $logPath -WhatIf:$WhatIfPreference -Confirm:$false
                     if ($WhatIfPreference) {
                         $candidate.EntraRemovalStatus = 'WhatIf'
@@ -372,19 +427,17 @@ try {
                     } else {
                         $candidate.EntraRemovalStatus = 'Skipped'
                     }
-                } else {
-                    $candidate.EntraRemovalStatus = 'SkippedAutopilotSubmissionFailed'
+                } catch {
+                    $deletionErrors++
+                    $candidate.ErrorMessage = $_.Exception.Message
+                    Write-CleanupLog -Message "Failed to process deletion for Entra device '$($candidate.EntraObjectId)': $($_.Exception.Message)" -Level ERROR -LogPath $logPath
                 }
-            } catch {
-                $deletionErrors++
-                $candidate.ErrorMessage = $_.Exception.Message
-                Write-CleanupLog -Message "Failed to process deletion for Entra device '$($candidate.EntraObjectId)': $($_.Exception.Message)" -Level ERROR -LogPath $logPath
             }
         }
 
         # Re-write reports so DeletedDevices.csv and status columns reflect the outcome.
         $removedCount = @($allEvaluatedDevices | Where-Object EntraRemovalStatus -eq 'Removed').Count
-                $autopilotSubmittedCount = @($allEvaluatedDevices | Where-Object AutopilotRemovalStatus -in 'RemovalSubmitted', 'AlreadyRemoved').Count
+        $autopilotSubmittedCount = @($allEvaluatedDevices | Where-Object AutopilotRemovalStatus -in 'RemovalSubmitted', 'AlreadyRemoved').Count
         Write-CleanupLog -Message "Lifecycle actions completed: Autopilot removal submission(s) accepted=$autopilotSubmittedCount; Entra object(s) disabled=0; Entra object(s) removed=$removedCount." -Level INFO -LogPath $logPath
         Export-CleanupReports -AllEvaluatedDevices $allEvaluatedDevices -OutputPath $resolvedOutputPath
 
@@ -398,9 +451,20 @@ try {
     Write-CleanupLog -Message "Unhandled error: $($_.Exception.Message)" -Level ERROR -LogPath $logPath
     if ($exitCode -eq 0) { $exitCode = 3 }
 } finally {
+    if ($deletionPlan -and (Test-Path -LiteralPath $journalPath)) {
+        $journal = Get-Content -LiteralPath $journalPath -Tail 1 | ConvertFrom-Json
+        if ($journal.PlanHash -cne $approvalHash -or $journal.TenantId -ne $deletionPlan.TenantId) {
+            throw 'Deletion journal does not match the approved plan.'
+        }
+        $records = if ($ScrappedDeviceCsvPath) { $scrappedDeviceRecords } else { $allEvaluatedDevices }
+        Set-DeviceDeletionResults -Workflow $deletionPlan.Workflow -Records $records -Results @($journal.Results)
+    }
+    Export-CleanupReports -AllEvaluatedDevices $allEvaluatedDevices -OutputPath $resolvedOutputPath
+    Export-ReportCsv -InputObject $scrappedDeviceRecords -Path (Join-Path $resolvedOutputPath 'ScrappedDeviceResults.csv')
     $runSummary = New-RunSummary -RunId $runId -Mode $Mode -StartTimeUtc $startTimeUtc -CutoffDateUtc $cutoffDateUtc `
         -DaysInactive $DaysInactive -AllEvaluatedDevices $allEvaluatedDevices -WhatIfMode ([bool]$WhatIfPreference) `
-        -ScrappedDeviceRecords $scrappedDeviceRecords -ConfirmationGranted $confirmationGranted -DiscoveryComplete $discoveryComplete -ExitCode $exitCode
+        -ScrappedDeviceRecords $scrappedDeviceRecords -AllowOnPremisesSyncedDeletion ([bool]$AllowOnPremisesSyncedDeletion) `
+        -ConfirmationGranted $confirmationGranted -DiscoveryComplete $discoveryComplete -ExitCode $exitCode
 
     Complete-ProjectExecution -RunSummary $runSummary -OutputPath $resolvedOutputPath -LogPath $logPath
 }

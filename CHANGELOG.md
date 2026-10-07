@@ -2,6 +2,41 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.0] - Unreleased
+
+### Changed
+
+- Align pre-confirmation summaries with separate stale/scrapped workflows:
+  remove obsolete Autopilot stale-deletion lines, distinguish target serials
+  from unique operations and retained Entra records, and show execution context.
+- Protect Autopilot-backed devices from activity-based deletion. Explicit
+  scrapped cleanup now removes Intune then Autopilot, leaves Entra objects for
+  review, and blocks deregistration when required Intune removal fails.
+- Apply protection, client-platform scope, duplicate-serial ambiguity and
+  conflicting-identifier checks to scrapped hardware; serial input no longer
+  bypasses these safety rules.
+- Use the currently documented `Directory.AccessAsUser.All` permission for
+  delegated Entra DELETE; scrapped-only runs request no Entra write scope.
+  Administrator consent and live authorization remain subject to lab validation.
+
+### Added
+
+- Opt-in `JsonBatch` deletion transport, 1-20 operation envelopes, tenant-bound
+  hashed plans, per-object ShouldProcess, phased dependencies, durable journals,
+  finite subrequest retries, and optional bounded read-back verification.
+  Individual SDK calls remain the default; no live tenant validation performed.
+- Offline batch regression coverage and updated lifecycle safety expectations.
+
+### Fixed
+
+- Preserve received batch outcomes when restoring SDK retry settings fails,
+  stop remaining execution, and retain both errors if the request also failed.
+- Serialize typed CSV timestamps with explicit UTC and full fractional
+  precision without changing classification objects or historical artifacts.
+- Use relative SDK routes for batch submission and verification to avoid
+  absolute-URL environment mutation causing invalid authentication URIs on
+  later envelopes. Surface the original envelope error without replaying it.
+
 ## [1.0.2] - 2026-09-29
 
 ### Fixed

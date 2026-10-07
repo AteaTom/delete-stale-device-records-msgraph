@@ -63,13 +63,15 @@ Describe 'Get-StaleDeviceCandidates protection integration' {
         $device = New-TestEntraDevice -Id 'p2' -DeviceId 'dp2' -DisplayName 'W' -ApproximateLastSignInDateTime (Get-Date).ToUniversalTime().AddDays(-300) -OnPremisesSyncEnabled $true
         $result = Get-StaleDeviceCandidates -EntraDevices @($device) -Indexes $indexes -CutoffDateUtc $cutoff -RunId 'r1'
         $result[0].Decision | Should -Be 'Excluded'
-        $result[0].ReasonCode | Should -Be 'ProtectedDevice'
+        $result[0].ReasonCode | Should -Be 'OnPremisesSyncProtected'
     }
 
     It 'allows on-premises synchronized device deletion only when the override switch is set' {
         $device = New-TestEntraDevice -Id 'p3' -DeviceId 'dp3' -DisplayName 'W' -ApproximateLastSignInDateTime (Get-Date).ToUniversalTime().AddDays(-300) -OnPremisesSyncEnabled $true
         $result = Get-StaleDeviceCandidates -EntraDevices @($device) -Indexes $indexes -CutoffDateUtc $cutoff -RunId 'r1' -AllowOnPremisesSyncedDeletion
         $result[0].Decision | Should -Be 'Candidate'
+        $result[0].ReasonCode | Should -Be 'Stale'
+        $result[0].EntraAction | Should -Be 'Remove'
     }
 
     It 'removes stale disabled devices directly' {
