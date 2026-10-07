@@ -99,14 +99,6 @@ against routine manual Entra deletion after deregistration:
 [deregistration guidance](https://learn.microsoft.com/autopilot/registration-overview#deregister-a-device). See
 [docs/Architecture.md](docs/Architecture.md).
 
-### Experimental batch-removal migration
-
-See the [batch-removal migration plan](docs/BatchRemovalMigrationPlan.md) for
-the proposed opt-in Autopilot bulk backend, safety gates, test coverage, and
-staged lab/production rollout. This is a proposal only: individual identity
-DELETE remains the current implementation, and no batch-selection parameter
-is available yet.
-
 ## Prerequisites
 
 - PowerShell 7.0 or later.
@@ -205,6 +197,11 @@ remaining execution; reconcile the journal before another destructive run.
 target at most three times, five seconds apart. `VerifiedAbsent` is distinct
 from DELETE acceptance and portal synchronization. See
 [docs/BatchDeletion.md](docs/BatchDeletion.md) for limits, safeguards and testing.
+
+See the [batch-removal rollout plan](docs/BatchRemovalMigrationPlan.md) for
+implemented safeguards, operator migration requirements, remaining validation
+gates, and staged adoption of the existing JsonBatch transport. Individual
+remains the default; no serial-based Autopilot bulk backend is proposed.
 
 ## Scrapped devices (explicit serial-number removal)
 
