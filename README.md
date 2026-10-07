@@ -198,6 +198,11 @@ target at most three times, five seconds apart. `VerifiedAbsent` is distinct
 from DELETE acceptance and portal synchronization. See
 [docs/BatchDeletion.md](docs/BatchDeletion.md) for limits, safeguards and testing.
 
+See the [batch-removal rollout plan](docs/BatchRemovalMigrationPlan.md) for
+implemented safeguards, operator migration requirements, remaining validation
+gates, and staged adoption of the existing JsonBatch transport. Individual
+remains the default; no serial-based Autopilot bulk backend is proposed.
+
 ## Scrapped devices (explicit serial-number removal)
 
 For physically scrapped hardware, select `-ScrappedDevices`. This separate
