@@ -66,8 +66,9 @@
     is still the default; this switch alone never deletes.
 
     .PARAMETER ScrappedDeviceCsvPath
-    Optional input override for -ScrappedDevices. Defaults to scrappeddevices.csv
-    beside this script. Requires a unique SerialNumber column. Empty serials
+    Optional input override for -ScrappedDevices. Defaults to
+    config\scrappeddevices.csv relative to the repository containing this script.
+    Requires a unique SerialNumber column. Empty serials
     are ignored and duplicates are counted and deduplicated case-insensitively.
     Path-only invocation is no longer supported.
 
@@ -141,7 +142,7 @@ param(
     [switch]$ScrappedDevices,
 
     [Parameter(ParameterSetName = 'Scrapped')]
-    [string]$ScrappedDeviceCsvPath = (Join-Path $PSScriptRoot 'scrappeddevices.csv'),
+    [string]$ScrappedDeviceCsvPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'config\scrappeddevices.csv'),
 
     [Parameter(ParameterSetName = 'Scrapped')]
     [switch]$AllowLegacyScrappedDeviceFormat,

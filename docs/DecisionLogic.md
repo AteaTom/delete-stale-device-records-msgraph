@@ -82,7 +82,8 @@ Autopilot records, and then exits early before the standard stale-device
 lifecycle executes for that run.
 
 `-DaysInactive` cannot bind in this parameter set and is not used in scrapped
-initialization, logging or summaries. Default input is `src\scrappeddevices.csv`
+initialization, logging or summaries. Default input is `config\scrappeddevices.csv`,
+resolved relative to the repository containing the script,
 with a required `SerialNumber` column. An explicit
 `-AllowLegacyScrappedDeviceFormat` permits the old headerless text format.
 

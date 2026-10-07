@@ -2,10 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
-## [1.2.0] - Unreleased
+## [1.2.0] - 2026-10-07
 
 ### Changed
 
+- Resolve the default scrapped input from `config\scrappeddevices.csv` in the
+  repository instead of beside the script in `src`. Explicit path overrides
+  remain supported; neither the old path nor the example is used as a fallback.
 - Separate explicit `-ScrappedDevices` retirement from inactivity cleanup.
   `-DaysInactive` is unavailable in that parameter set and scrapped reports
   contain no inactivity threshold or cutoff. Ordinary stale cleanup is unchanged.

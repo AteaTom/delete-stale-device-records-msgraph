@@ -62,7 +62,8 @@ eligibility change, or live tenant execution is authorized by this document.
 Existing path-only commands must add `-ScrappedDevices`, remove
 `-DaysInactive`, and use a CSV with a `SerialNumber` header. Headerless input
 requires explicit `-AllowLegacyScrappedDeviceFormat`. The default input path
-is `src\scrappeddevices.csv`, resolved beside the script, and is not populated
+is `config\scrappeddevices.csv`, resolved relative to the repository containing
+the script, and is not populated
 with tenant data by the repository. Use the synthetic example only as a
 format reference.
 

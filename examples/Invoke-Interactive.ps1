@@ -8,8 +8,8 @@
 $scriptPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'src/Invoke-StaleDeviceCleanup.ps1'
 
 # For explicit retirement replace -DaysInactive with -ScrappedDevices.
-# Default input is src\scrappeddevices.csv with a SerialNumber header.
-# Audit first; Entra deletion requires verified related Autopilot absence.
+# Default input is config\scrappeddevices.csv with a SerialNumber header.
+# Audit first; Entra deletion requires accepted related Autopilot DELETE requests.
 & $scriptPath `
     -Mode Interactive `
     -DaysInactive 365 `
