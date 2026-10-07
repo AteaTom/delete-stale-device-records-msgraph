@@ -7,15 +7,12 @@
 #>
 $scriptPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'src/Invoke-StaleDeviceCleanup.ps1'
 
-# Add -ScrappedDeviceCsvPath '.\src\SkrotadeDatorer.csv' to also remove Autopilot,
-# Intune, and Entra records for physically scrapped devices listed by serial number.
-# When the serial exists in Autopilot, all linked Entra and Intune records for that
-# serial are expanded into the exact deletion set; duplicates without Autopilot
-# authority remain Ambiguous and are skipped.
+# For explicit retirement replace -DaysInactive with -ScrappedDevices.
+# Default input is src\scrappeddevices.csv with a SerialNumber header.
+# Audit first; Entra deletion requires verified related Autopilot absence.
 & $scriptPath `
     -Mode Interactive `
     -DaysInactive 365 `
-    -DaysDisabled 30 `
     -OutputPath '.\output' `
     -ProtectedDeviceIdFile '.\config\ProtectedDevices.example.csv' `
     -ProtectedDeviceNamePattern @('BREAKGLASS-*', 'PAW-*', 'ADMIN-*', 'KIOSK-CRITICAL-*') `

@@ -45,6 +45,9 @@ Describe 'Guarded JSON batch deletion' {
         Mock Get-MgRequestContext -ModuleName StaleDeviceCleanup { [PSCustomObject]@{ MaxRetry = 3 } }
         Mock Set-MgRequestContext -ModuleName StaleDeviceCleanup { }
         Mock Start-Sleep -ModuleName StaleDeviceCleanup { }
+        Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -ParameterFilter { $Method -eq 'GET' } {
+            [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::NotFound)
+        }
         Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup {
             $requests = @((ConvertFrom-Json $Body).requests)
             [PSCustomObject]@{
@@ -393,27 +396,30 @@ Describe 'Guarded JSON batch deletion' {
         Invoke-DeviceDeletionPlan @script:invoke | Out-Null
     }
 
-    It 'blocks Autopilot after a failed Intune prerequisite and never plans scrapped Entra deletion' {
+    It 'blocks Autopilot and Entra after a failed Intune prerequisite' {
         $script:invoke.Plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records @(New-ScrappedBatchRecord)
         $script:invoke.ApprovalHash = $script:invoke.Plan.Hash
-        @($script:invoke.Plan.Operations | Where-Object Resource -eq 'Entra').Count | Should -Be 0
+        @($script:invoke.Plan.Operations | Where-Object Resource -eq 'Entra').Count | Should -Be 1
         Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup {
             [PSCustomObject]@{ responses = @([PSCustomObject]@{ id = 'intune-intune1'; status = 400 }) }
         }
         $results = @(Invoke-DeviceDeletionPlan @script:invoke)
         ($results | Where-Object Resource -eq 'Autopilot').Status | Should -Be 'BlockedDependency'
+        ($results | Where-Object Resource -eq 'Entra').Status | Should -Be 'BlockedDependency'
         Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1 -Exactly
     }
 
-    It 'executes separate Intune and Autopilot phases with simulation parity' {
+    It 'executes all three phases with verified Autopilot absence and simulation parity' {
         $script:invoke.Plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records @(New-ScrappedBatchRecord)
         $script:invoke.ApprovalHash = $script:invoke.Plan.Hash
         $results = @(Invoke-DeviceDeletionPlan @script:invoke)
         ($results | Where-Object Resource -eq 'Intune').Status | Should -Be 'Removed'
         ($results | Where-Object Resource -eq 'Autopilot').Status | Should -Be 'RemovalSubmitted'
-        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 2 -Exactly
+        ($results | Where-Object Resource -eq 'Entra').Status | Should -Be 'Removed'
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 3 -Exactly -ParameterFilter { $Method -eq 'POST' }
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1 -Exactly -ParameterFilter { $Method -eq 'GET' }
         $script:invoke.JournalPath = Join-Path $TestDrive 'simulation.jsonl'
-        @(Invoke-DeviceDeletionPlan @script:invoke -WhatIf | Where-Object Status -eq 'WhatIf').Count | Should -Be 2
+        @(Invoke-DeviceDeletionPlan @script:invoke -WhatIf | Where-Object Status -eq 'WhatIf').Count | Should -Be 3
     }
 
     It 'isolates a failed Intune prerequisite from an unrelated successful device' {
@@ -421,6 +427,7 @@ Describe 'Guarded JSON batch deletion' {
             (New-ScrappedBatchRecord),
             (New-ScrappedBatchRecord -Serial 'SERIAL2' -IntuneId 'intune2' -AutopilotId 'ap2')
         )
+        $records[1].EntraObjectId = 'entra2'
         $script:invoke.Plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records $records
         $script:invoke.ApprovalHash = $script:invoke.Plan.Hash
         Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup {
@@ -443,7 +450,9 @@ Describe 'Guarded JSON batch deletion' {
         Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup {
             [PSCustomObject]@{ responses = @([PSCustomObject]@{ id = 'autopilot-ap1'; status = 404 }) }
         }
-        (Invoke-DeviceDeletionPlan @script:invoke).Status | Should -Be 'RemovalFailed'
+        $results = @(Invoke-DeviceDeletionPlan @script:invoke)
+        ($results | Where-Object Resource -eq 'Autopilot').Status | Should -Be 'RemovalFailed'
+        ($results | Where-Object Resource -eq 'Entra').Status | Should -Be 'BlockedDependency'
     }
 
     It 'only verifies observed absence on an authoritative read-back 404' {

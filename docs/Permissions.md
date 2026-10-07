@@ -28,7 +28,7 @@ Entra deletion. No consent or tenant authorization was validated by offline test
 | --- | --- |
 | Audit | `Device.Read.All`, `DeviceManagementManagedDevices.Read.All`, `DeviceManagementServiceConfig.Read.All` |
 | Interactive / Automatic | All read scopes above, plus `Directory.AccessAsUser.All` |
-| Interactive / Automatic with `-ScrappedDeviceCsvPath` | All read scopes above, plus `DeviceManagementManagedDevices.ReadWrite.All` and `DeviceManagementServiceConfig.ReadWrite.All`; no Entra write scope |
+| Interactive / Automatic with `-ScrappedDevices` | All read scopes above, plus `DeviceManagementManagedDevices.ReadWrite.All`, `DeviceManagementServiceConfig.ReadWrite.All` and `Directory.AccessAsUser.All` |
 
 `Test-GraphPermissions` compares the scopes actually granted to the signed-in
 session (`(Get-MgContext).Scopes`) against the scopes required for the
@@ -66,9 +66,10 @@ before use in those environments.
   Autopilot-backed objects are protected, not deregistered by activity.
 - Intune managed-device records are **never** deleted by the activity-based
   stale-device workflow, in any mode.
-- The one exception is the explicit `-ScrappedDeviceCsvPath` workflow: for
+- The one exception is the explicit `-ScrappedDevices` workflow: for
   serial numbers you provide, it removes the matching Windows Autopilot
-  identity and Intune managed device. Entra objects are retained for review. It never acts on
+  identity, Intune managed device, and safely correlated Entra objects only
+  after verified Autopilot absence. It never acts on
   any serial number not present in that file.
 - iOS and Android devices are never looked up in, or deleted from, Windows
   Autopilot.

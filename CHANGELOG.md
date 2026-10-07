@@ -2,7 +2,31 @@
 
 All notable changes to this project are documented in this file.
 
-## [1.1.0] - Unreleased
+## [1.2.0] - Unreleased
+
+### Changed
+
+- Separate explicit `-ScrappedDevices` retirement from inactivity cleanup.
+  `-DaysInactive` is unavailable in that parameter set and scrapped reports
+  contain no inactivity threshold or cutoff. Ordinary stale cleanup is unchanged.
+- Breaking migration: old path-only scrapped commands require
+  `-ScrappedDevices`; strict CSV requires a `SerialNumber` header. Optional
+  `-AllowLegacyScrappedDeviceFormat` explicitly permits headerless input.
+- Remove safely correlated scrapped Entra objects after Intune removal and
+  verified absence of all related Autopilot identities, in both Individual
+  and JsonBatch. Pending verification or failed prerequisites block dependent
+  operations; independent targets continue. Destructive scrapped runs now
+  require delegated `Directory.AccessAsUser.All` in addition to Intune scopes.
+- Permit multiple records only when stable relationships corroborate one
+  physical device; retain protection, platform, synchronization and ambiguity
+  gates. Report complete, partial, blocked, pending and simulated outcomes.
+
+### Added
+
+- Offline parameter-binding, CSV, correlation, all-service, dependency
+  verification and partial-failure regression coverage; synthetic input sample.
+
+## [1.1.0]
 
 ### Changed
 

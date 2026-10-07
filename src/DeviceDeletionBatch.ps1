@@ -40,6 +40,9 @@ function New-DeviceDeletionPlan {
             if ($record.AutopilotIdentityId) {
                 $targets += [PSCustomObject]@{ Resource = 'Autopilot'; ObjectId = $record.AutopilotIdentityId }
             }
+            if ($record.EntraObjectId) {
+                $targets += [PSCustomObject]@{ Resource = 'Entra'; ObjectId = $record.EntraObjectId }
+            }
         }
         foreach ($target in $targets) {
             if ([string]$target.ObjectId -notmatch '^[A-Za-z0-9-]+$') {
@@ -62,6 +65,17 @@ function New-DeviceDeletionPlan {
                     @($operations[$key].Dependencies) + @($intuneIds | ForEach-Object { "intune-$_".ToLowerInvariant() }) |
                         Sort-Object -Unique
                 )
+            } elseif ($Workflow -eq 'Scrapped' -and $target.Resource -eq 'Entra') {
+                $related = @($Records | Where-Object {
+                    $_.MatchStatus -eq 'Matched' -and $_.NormalizedSerialNumber -eq $record.NormalizedSerialNumber
+                })
+                $prerequisites = @(
+                    foreach ($row in $related) {
+                        if ($row.IntuneManagedDeviceId) { "intune-$($row.IntuneManagedDeviceId)".ToLowerInvariant() }
+                        if ($row.AutopilotIdentityId) { "autopilot-$($row.AutopilotIdentityId)".ToLowerInvariant() }
+                    }
+                )
+                $operations[$key].Dependencies = @(@($operations[$key].Dependencies) + $prerequisites | Sort-Object -Unique)
             }
         }
     }
@@ -252,7 +266,6 @@ function Invoke-DeviceDeletionPlan {
             throw 'Deletion blocked: invalid or duplicate operation ID.'
         }
         if (($snapshot.Workflow -eq 'Stale' -and $operation.Resource -ne 'Entra') -or
-            ($snapshot.Workflow -eq 'Scrapped' -and $operation.Resource -eq 'Entra') -or
             $snapshot.Workflow -notin 'Stale', 'Scrapped') {
             throw 'Deletion blocked: operation violates the workflow policy.'
         }
@@ -260,7 +273,9 @@ function Invoke-DeviceDeletionPlan {
     }
     foreach ($operation in $operations) {
         foreach ($dependency in $operation.Dependencies) {
-            if (-not $byId.ContainsKey($dependency) -or $operation.Resource -ne 'Autopilot' -or $byId[$dependency].Resource -ne 'Intune') {
+            if (-not $byId.ContainsKey($dependency) -or $snapshot.Workflow -ne 'Scrapped' -or
+                -not (($operation.Resource -eq 'Autopilot' -and $byId[$dependency].Resource -eq 'Intune') -or
+                    ($operation.Resource -eq 'Entra' -and $byId[$dependency].Resource -in 'Intune', 'Autopilot'))) {
                 throw 'Deletion blocked: invalid prerequisite in plan.'
             }
         }
@@ -298,11 +313,16 @@ function Invoke-DeviceDeletionPlan {
             $pending = [System.Collections.Generic.List[object]]::new()
             foreach ($operation in @($operations | Where-Object Resource -eq $phase)) {
                 $blocked = @($operation.Dependencies | Where-Object {
-                    $results[$_].Status -ne 'Removed' -and -not ($WhatIfPreference -and $results[$_].Status -eq 'WhatIf')
+                    if ($WhatIfPreference -and $results[$_].Status -eq 'WhatIf') { $false }
+                    elseif ($byId[$_].Resource -eq 'Autopilot') {
+                        $results[$_].Status -notin 'RemovalSubmitted', 'AlreadyRemoved', 'AlreadyAbsent' -or
+                            $results[$_].VerificationStatus -ne 'VerifiedAbsent'
+                    } else { $results[$_].Status -notin 'Removed', 'AlreadyRemoved', 'AlreadyAbsent' }
                 }).Count -gt 0
                 if ($blocked) {
                     $results[$operation.Id].Status = 'BlockedDependency'
-                    $results[$operation.Id].ErrorMessage = 'Required Intune removal did not succeed.'
+                    $results[$operation.Id].ErrorMessage = 'Required removal or verified Autopilot absence was not established.'
+                    Write-CleanupLog -Message "Blocked '$($operation.Id)': $($results[$operation.Id].ErrorMessage)" -Level WARNING -LogPath $LogPath
                 } elseif ($PSCmdlet.ShouldProcess("Tenant $($snapshot.TenantId): $phase/$($operation.ObjectId)", 'Delete approved device record')) {
                     $pending.Add($operation)
                 } else {
@@ -394,12 +414,23 @@ function Invoke-DeviceDeletionPlan {
                 }
                 & $saveJournal 'ChunkCompleted'
             }
+            if ($snapshot.Workflow -eq 'Scrapped' -and $phase -eq 'Autopilot' -and -not $WhatIfPreference) {
+                foreach ($operation in @($operations | Where-Object Resource -eq 'Autopilot')) {
+                    $result = $results[$operation.Id]
+                    if ($result.Status -eq 'RemovalSubmitted') {
+                        $verification = Test-DeviceDeletionOutcome -Operation $operation -TenantId $snapshot.TenantId -LogPath $LogPath
+                        $result.VerificationStatus = $verification.Status
+                        if ($verification.ErrorMessage) { $result.ErrorMessage = $verification.ErrorMessage }
+                        & $saveJournal 'DependencyVerification'
+                    }
+                }
+            }
             & $saveJournal 'PhaseCompleted'
         }
         if ($VerifyDeletion -and -not $WhatIfPreference) {
             foreach ($operation in $operations) {
                 $result = $results[$operation.Id]
-                if ($result.Status -in 'Removed', 'RemovalSubmitted', 'AlreadyAbsent') {
+                if ($result.Status -in 'Removed', 'RemovalSubmitted', 'AlreadyAbsent' -and $result.VerificationStatus -eq 'NotRequested') {
                     $verification = Test-DeviceDeletionOutcome -Operation $operation -TenantId $snapshot.TenantId -LogPath $LogPath
                     $result.VerificationStatus = $verification.Status
                     if ($verification.ErrorMessage) { $result.ErrorMessage = $verification.ErrorMessage }
@@ -429,7 +460,7 @@ function Test-DeviceDeletionOutcome {
         [Parameter(Mandatory)][PSCustomObject]$Operation,
         [Parameter(Mandatory)][string]$TenantId,
         [ValidateRange(1, 5)][int]$MaxAttempts = 3,
-        [Parameter(Mandatory)][string]$LogPath
+        [string]$LogPath
     )
 
     $uri = '/v1.0' + (Get-DeviceOperationUri -Operation $Operation)
@@ -449,14 +480,18 @@ function Test-DeviceDeletionOutcome {
                 throw "Read-back returned HTTP $([int]$response.StatusCode); absence is not established."
             }
         } catch {
-            Write-CleanupLog -Message "Verification for '$($Operation.Id)' failed: $($_.Exception.Message)" -Level WARNING -LogPath $LogPath
+            $message = "Verification for '$($Operation.Id)' failed: $($_.Exception.Message)"
+            if ($LogPath) { Write-CleanupLog -Message $message -Level WARNING -LogPath $LogPath }
+            else { Write-Warning $message }
             return [PSCustomObject]@{ Status = 'OutcomeUnknown'; ErrorMessage = $_.Exception.Message }
         } finally {
             if ($response -is [System.IDisposable]) { $response.Dispose() }
         }
         if ($attempt -lt $MaxAttempts) { Start-Sleep -Seconds 5 }
     }
-    Write-CleanupLog -Message "Verification pending for '$($Operation.Id)': record still visible." -Level WARNING -LogPath $LogPath
+    $message = "Verification pending for '$($Operation.Id)': record still visible."
+    if ($LogPath) { Write-CleanupLog -Message $message -Level WARNING -LogPath $LogPath }
+    else { Write-Warning $message }
     return [PSCustomObject]@{ Status = 'VerificationPending'; ErrorMessage = 'Record still visible after bounded read-back.' }
 }
 
@@ -471,12 +506,12 @@ function Set-DeviceDeletionResults {
     $byId = @{}
     foreach ($result in $Results) { $byId[$result.Id] = $result }
     foreach ($record in $Records) {
-        if ($Workflow -eq 'Scrapped' -and $record.EntraObjectId) { $record.EntraRemovalStatus = 'ManualReview' }
         $fields = if ($Workflow -eq 'Stale') {
             @(@{ Resource = 'Entra'; IdField = 'EntraObjectId'; StatusField = 'EntraRemovalStatus' })
         } else {
             @(@{ Resource = 'Intune'; IdField = 'IntuneManagedDeviceId'; StatusField = 'IntuneRemovalStatus' },
-                @{ Resource = 'Autopilot'; IdField = 'AutopilotIdentityId'; StatusField = 'AutopilotRemovalStatus' })
+                @{ Resource = 'Autopilot'; IdField = 'AutopilotIdentityId'; StatusField = 'AutopilotRemovalStatus' },
+                @{ Resource = 'Entra'; IdField = 'EntraObjectId'; StatusField = 'EntraRemovalStatus' })
         }
         foreach ($field in $fields) {
             $record | Add-Member -NotePropertyName "$($field.Resource)VerificationStatus" -NotePropertyValue 'NotRequested' -Force
@@ -485,8 +520,14 @@ function Set-DeviceDeletionResults {
                 $result = $byId[$key]
                 $record.($field.StatusField) = $result.Status
                 $record | Add-Member -NotePropertyName "$($field.Resource)VerificationStatus" -NotePropertyValue $result.VerificationStatus -Force
-                if ($result.ErrorMessage) { $record.ErrorMessage = $result.ErrorMessage }
+                if ($result.ErrorMessage) {
+                    if ($Workflow -eq 'Scrapped') { Add-ScrappedDeviceError -Record $record -Message $result.ErrorMessage }
+                    else { $record.ErrorMessage = $result.ErrorMessage }
+                }
+            } elseif ($Workflow -eq 'Scrapped' -and -not $record.($field.IdField) -and $record.MatchStatus -eq 'Matched') {
+                $record.($field.StatusField) = 'NotApplicable'
             }
         }
     }
+    if ($Workflow -eq 'Scrapped') { Set-ScrappedDeviceOutcomes -Records $Records }
 }

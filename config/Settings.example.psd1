@@ -13,5 +13,7 @@
     TenantId                   = ''
     ProtectedDeviceIdFile      = '.\config\ProtectedDevices.example.csv'
     ProtectedDeviceNamePattern = @('BREAKGLASS-*', 'PAW-*', 'ADMIN-*', 'KIOSK-CRITICAL-*')
-    ScrappedDeviceCsvPath      = '.\src\SkrotadeDatorer.csv'
+    # For scrapped cleanup use a separate invocation with -ScrappedDevices,
+    # omitting DaysInactive. Default input: .\src\scrappeddevices.csv.
+    # Optional -ScrappedDeviceCsvPath override; strict SerialNumber header.
 }

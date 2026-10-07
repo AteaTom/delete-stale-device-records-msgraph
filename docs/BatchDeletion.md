@@ -26,9 +26,13 @@ candidates, review the plan, and supply its exact `ApprovalHash`,
 ## Workflow policy
 
 Stale cleanup plans only eligible Entra objects without Autopilot. Scrapped
-cleanup plans Intune removal, followed by Windows Autopilot identity removal.
+cleanup plans Intune removal, Windows Autopilot identity removal, then eligible
+Entra removal.
 All required Intune operations for the serial must succeed before Autopilot.
-Scrapped Entra objects are always retained for review. No arbitrary batch
+Entra prerequisites include required Intune removals and verified absence of
+all associated Autopilot identities. Verification runs between the Autopilot
+and Entra phases even without `-VerifyDeletion`. Pending/denied reads block
+dependent Entra targets while independent operations continue. No arbitrary batch
 `dependsOn` graph is constructed and no serial-based `deleteDevices` action
 is used.
 
@@ -93,7 +97,9 @@ See [Microsoft throttling guidance](https://learn.microsoft.com/graph/throttling
 
 ## Optional verification
 
-`-VerifyDeletion` requires JsonBatch. After deletion phases, successful IDs are
+`-VerifyDeletion` requires JsonBatch. This optional final verification is
+separate from mandatory scrapped Autopilot dependency verification, which
+also applies to Individual. After deletion phases, remaining successful IDs are
 read at most three times with five-second intervals. An exact-route read-back
 404 becomes `VerifiedAbsent`; continued visibility becomes
 `VerificationPending`; denied/failed reads become `OutcomeUnknown`, with a
