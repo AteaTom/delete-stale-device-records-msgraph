@@ -68,8 +68,8 @@ Multiple records matching the same key (duplicate serial numbers, multiple
 Autopilot registrations for one Entra device, etc.) produce
 `MatchStatus = Ambiguous` and block deletion for **all** involved records.
 
-Only `MatchConfidence = High` may be used for **automatic Autopilot
-deletion**. Windows devices with a Medium/Low-confidence Autopilot match are
+Autopilot-backed devices are never deregistered by activity-based cleanup.
+Windows devices with a Medium/Low-confidence Autopilot match are
 routed to manual review (`ReasonCode = LowConfidenceMatch`) rather than
 deleted.
 
@@ -85,39 +85,37 @@ CSV serials are deduplicated case-insensitively before correlation. The first
 occurrence and its casing are preserved; each later occurrence is ignored and
 counted as a duplicate CSV row in the summary.
 
-- If a serial exists in Windows Autopilot, Autopilot is treated as the
-  authority for that serial.
-- In that case, the script expands the match to every related Entra and Intune
-  object already linked to the same serial and emits one row per actual object
-  being removed.
-- If there are multiple matches but no Autopilot authority, the serial is marked
-  `Ambiguous` and excluded from deletion.
+- A serial must identify an unambiguous client device. Duplicate Intune, Entra
+  or Autopilot matches fail closed even with an Autopilot registration.
+- Protected IDs/serials/names, servers, unsupported or missing platforms, and
+  conflicting stable IDs exclude the entire serial.
+- For a valid match, emit object-level rows for Intune/Autopilot targets and
+  related Entra objects for review.
 - If no match is found in any source, the row is marked `NotFound` and no
   deletion is attempted.
 
-This rule ensures that a CSV containing a serial that is present in Autopilot
-never produces a misleading tenant-wide summary or a mixed-platform count.
-Instead, the scrapped-device summary shows the exact deletion targets for the
-serial that was supplied. It is displayed before interactive confirmation and
-deduplicates object IDs when counting Autopilot, Intune, and Entra removals.
+The summary shows unique approved Intune/Autopilot targets and Entra review
+counts before confirmation, rather than a tenant-wide stale-device summary.
 
 After confirmation, the scrapped-device operation follows this order:
 
 1. Remove each unique matched Intune managed-device record once.
 2. Submit every unique Autopilot identity once through the supported identity
    DELETE endpoint.
-3. Treat a successful response as an accepted asynchronous submission and
-   continue without polling for the Autopilot record to disappear.
-4. Remove each unique related Entra object once. A failed identity DELETE
-   blocks Entra removal for that identity's serial.
+   Failed or declined required Intune removals block Autopilot for the serial.
+3. Treat a successful Autopilot DELETE as submitted, not portal disappearance.
+4. Retain Entra objects for manual review; never delete them in this branch.
+5. Optional JsonBatch verification reads exact successful target IDs with
+   bounded retries and records absence separately from API success.
 
 ## Decision precedence (evaluated in order per device)
 
 1. `Server` / `Unsupported` platform → **Excluded** (`UnsupportedPlatform`)
 2. `Unknown` platform (missing/ambiguous OS) → **ManualReview** (`MissingOperatingSystem`)
-4. Protected by id/serial/name/pattern → **Excluded** (`ProtectedDevice`)
-5. Ambiguous correlation → **ManualReview** (`AmbiguousAutopilotMatch` / `DuplicateSerialNumber`)
-6. Windows device with a non-High-confidence Autopilot match → **ManualReview** (`LowConfidenceMatch`)
+3. Protected by id/serial/name/pattern → **Excluded** (`ProtectedDevice`)
+4. Ambiguous correlation → **ManualReview** (`AmbiguousAutopilotMatch` / `DuplicateSerialNumber`)
+5. Windows device with a non-High-confidence Autopilot match → **ManualReview** (`LowConfidenceMatch`)
+6. High-confidence Autopilot match → **Excluded** (`AutopilotProtected`)
 7. No authoritative activity timestamp at all → **ManualReview** (`MissingAllActivity`)
 8. Effective last activity newer than cutoff → **Excluded** (`RecentActivityDetected`)
 9. On-premises synchronized, override not set → **Excluded** (`OnPremisesSyncProtected`); the source AD object's deletion safety is not assessed.
@@ -129,11 +127,11 @@ After confirmation, the scrapped-device operation follows this order:
 Entra removal is direct after the safety checks and does not depend on a
 disabled timestamp or retention gate.
 
-For each lifecycle `Candidate`:
+Each lifecycle `Candidate` is a standalone Entra object with the established
+platform, activity, protection and ambiguity checks satisfied. Only its Entra
+object is deleted after approval; Intune remains an activity/correlation source.
+No stale candidate is sent to Autopilot deletion.
 
-1. For Windows with Autopilot and `MatchConfidence = High`, submit each unique
-   Autopilot identity once through the identity DELETE endpoint.
-2. If the DELETE succeeds, remove the related Entra object directly.
-3. If the identity DELETE fails, skip the Entra action,
-   record the failure, and continue processing.
-4. iOS and Android candidates are never sent to an Autopilot DELETE.
+JsonBatch changes transport, not classification. It freezes the approved
+target set, rechecks context before each envelope and records partial outcomes.
+See [BatchDeletion.md](BatchDeletion.md).

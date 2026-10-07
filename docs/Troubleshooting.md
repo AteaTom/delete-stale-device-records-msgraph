@@ -30,17 +30,17 @@ when this occurs.
 
 ## Autopilot removal reported but Entra device still exists
 
-Check `AutopilotRemovalStatus` and `EntraRemovalStatus` in
-`AllEvaluatedDevices.csv`. `AutopilotRemovalStatus = RemovalSubmitted` means
-The identity DELETE was accepted. Entra removal is attempted directly after
-that successful Autopilot operation; a failed identity DELETE blocks Entra.
+This is expected: Autopilot-backed objects are protected from stale cleanup,
+and scrapped cleanup retains Entra records for manual review. Do not delete
+them manually merely because Autopilot deregistration was accepted.
 
 For `ScrappedDeviceResults.csv`, `RemovalSubmitted` means the v1.0 Autopilot
 identity DELETE accepted the removal request. The script does not wait for the
 portal to synchronize. Microsoft notes that deregistration can take time; use
 **Sync** and **Refresh** in the Intune Autopilot devices view if the record
-remains visible. `RemovalFailed` means the identity DELETE failed and the
-related Entra removal was intentionally skipped.
+remains visible. `RemovalFailed` means the identity DELETE failed;
+`BlockedDependency` means a required Intune removal did not succeed.
+Entra objects remain `ManualReview` in either case.
 
 ## RunSummary planned and completed removal counts differ
 
@@ -54,7 +54,7 @@ The two Entra counts report different stages of the run:
 
 The completed count can therefore be lower than the planned count when no
 destructive operation was authorized, `-WhatIf` was used, discovery or
-permissions prevented deletion, an Autopilot removal failed, or an Entra
+permissions prevented deletion, an object was already absent, or an Entra
 removal failed. Check `Mode`, `WhatIfMode`, `ConfirmationGranted`,
 `DiscoveryComplete`, `ExitCode`, per-device removal statuses, and
 `ExecutionLog.txt` to see why planned removals were not completed.
@@ -66,10 +66,10 @@ to the latest project version before retrying.
 
 ## Entra devices are disabled instead of removed
 
-Direct removal is expected for a stale device. Microsoft Entra keeps deleted
-device objects in its deleted-device recovery window, so accidental removals
-can be restored according to tenant retention policy. `DeviceLifecycleState.json`
-is no longer a 30-day deletion gate.
+Direct removal is expected for an eligible standalone stale device.
+Entra device deletion is irreversible; associated BitLocker recovery keys
+must be backed up or no longer needed. `DeviceLifecycleState.json` is not a
+30-day deletion gate. Autopilot-backed objects are now excluded.
 
 `ExecutionLog.txt` records planned and completed removal counts. The same
 values are available in `RunSummary.json` as
@@ -119,6 +119,40 @@ Import-Module .\src\StaleDeviceCleanup.psd1 -Force
 with exponential backoff (or `Retry-After` when supplied), up to 5 attempts
 by default. Persistent throttling after 5 attempts surfaces as a terminating
 error for that operation.
+
+JsonBatch separately checks every subresponse. It retries only failed transient
+subrequests, honors their Retry-After headers, and restores SDK retry settings
+after temporarily disabling envelope retries. See [BatchDeletion.md](BatchDeletion.md).
+
+## Batch outcome unknown, invalid response, or journal already exists
+
+Stop and inspect `DeletionJournal.jsonl` and the final reports. Some operations
+may already have completed. Reconcile exact IDs read-only in the approved
+tenant before another destructive run. Do not delete the journal and replay
+an envelope blindly. Expired or modified plans must be regenerated and reviewed.
+Failed read-back is not evidence of absence.
+
+Once exact-ID read-only reconciliation is complete, run a new Audit rather
+than resubmitting the old plan. Compare remaining candidate IDs with historical
+unknown/unattempted IDs and investigate unexpected additions. A present
+object is not automatically authorized for deletion.
+Use the [operator validation procedure](BatchDeletion.md#operator-run-validation-procedure)
+for fresh Audit/WhatIf checks and separately authorized disposable-lab testing.
+Do not use remaining current-tenant candidates as test fixtures.
+
+### Invalid URI after the first batch
+
+Earlier batch code used absolute request URLs. Graph Authentication 2.37.0
+can leave its internal environment without an authentication endpoint after
+such a request; resetting SDK retries then exposes the invalid URI on the
+next envelope. Batch and verification code now uses relative SDK routes.
+The warning includes the underlying error.
+
+Do not assume the whole run failed without changes: inspect the journal for
+successful earlier chunks and unknown outcomes. Preserve all run artifacts.
+Start a fresh PowerShell process to clear affected SDK state and load the
+updated module before read-only reconciliation. Do not replay deletion until
+unknown outcomes have been reconciled and a new plan has been reviewed.
 
 ## Pester tests fail with "Connect-MgGraph is not recognized"
 
