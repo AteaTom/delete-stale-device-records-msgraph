@@ -6,9 +6,8 @@
 
     DaysInactive               = 180
     Mode                       = 'Audit'
-    DeletionTransport          = 'Individual' # Opt in to JsonBatch only after lab validation.
     BatchSize                  = 20
-    VerifyDeletion             = $false # Optional bounded read-back with JsonBatch.
+    VerifyDeletion             = $false # Optional bounded read-back after batch deletion.
     OutputPath                 = '.\output'
     TenantId                   = ''
     ProtectedDeviceIdFile      = '.\config\ProtectedDevices.example.csv'

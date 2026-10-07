@@ -36,8 +36,10 @@ all dependencies succeed and related Autopilot absence is verified. Do not
 delete Entra manually merely because deregistration was accepted.
 
 For `ScrappedDeviceResults.csv`, `RemovalSubmitted` means the v1.0 Autopilot
-identity DELETE accepted the removal request. The script does not wait for the
-portal to synchronize. Microsoft notes that deregistration can take time; use
+identity DELETE accepted the removal request. Related Entra deletion may then
+proceed; optional `-VerifyDeletion` is a later diagnostic read-back and does
+not gate that dependency. The script does not wait for the portal to
+synchronize. Microsoft notes that deregistration can take time; use
 **Sync** and **Refresh** in the Intune Autopilot devices view if the record
 remains visible. `RemovalFailed` means the identity DELETE failed;
 `BlockedDependency` means a required Intune removal did not succeed.
@@ -139,7 +141,7 @@ with exponential backoff (or `Retry-After` when supplied), up to 5 attempts
 by default. Persistent throttling after 5 attempts surfaces as a terminating
 error for that operation.
 
-JsonBatch separately checks every subresponse. It retries only failed transient
+Batch deletion separately checks every subresponse. It retries only failed transient
 subrequests, honors their Retry-After headers, and restores SDK retry settings
 after temporarily disabling envelope retries. See [BatchDeletion.md](BatchDeletion.md).
 

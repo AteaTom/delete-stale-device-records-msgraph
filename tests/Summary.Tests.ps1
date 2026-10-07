@@ -34,7 +34,7 @@ Describe 'Show-CleanupSummary workflow semantics' {
         }
         Show-CleanupSummary -EvaluatedDevices @($record, $record, $blocked, $review) `
             -CutoffDateUtc ([datetime]::UtcNow) -DaysInactive 180 -OutputPath $TestDrive `
-            -TenantId tenant1 -Mode Automatic -Simulation $true -DeletionTransport JsonBatch
+            -TenantId tenant1 -Mode Automatic -Simulation $true
         Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -Exactly -ParameterFilter {
             $Object -eq '  Entra objects to remove:      1'
         }
@@ -42,7 +42,7 @@ Describe 'Show-CleanupSummary workflow semantics' {
             $Object -like '*Windows with Autopilot*' -or $Object -like '*Autopilot records to remove*'
         }
         Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
-            $Object -eq 'Mode: Automatic; WhatIf: True; transport: JsonBatch'
+            $Object -eq 'Mode: Automatic; WhatIf: True'
         }
         Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
             $Object -eq 'No tenant DELETE requests will be sent.'

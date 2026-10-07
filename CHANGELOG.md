@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.3.0] - 2026-10-07
+
+### Changed
+
+- Make Graph JSON batch deletion the sole production deletion path for stale
+  and explicitly scrapped device workflows. Preserve Audit, WhatIf, explicit
+  confirmation, per-target results, phased dependencies, retry, journaling,
+  and optional verification safeguards.
+- Remove the `-DeletionTransport` selector and the exported individual-delete
+  helper functions. This is a breaking change for direct callers of those
+  module helpers; use the script workflows instead.
+- Remove the obsolete batch rollout plan and update the operator documentation
+  and tests for the single batch execution path.
+
 ## [1.2.0] - 2026-10-07
 
 ### Changed

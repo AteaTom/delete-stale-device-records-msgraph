@@ -1,6 +1,6 @@
 @{
     RootModule        = 'StaleDeviceCleanup.psm1'
-    ModuleVersion     = '1.2.0'
+    ModuleVersion     = '1.3.0'
     GUID              = 'a6e2f7c4-9b3d-4e2a-8f1b-6c7d8e9f0a1b'
     Author            = 'Repository owner'
     CompanyName       = 'Unspecified'
@@ -36,12 +36,6 @@
         'Set-ScrappedDeviceOutcomes',
         'Get-ScrappedDeviceSerialNumbers',
         'Resolve-ScrappedDeviceRecords',
-        'Remove-WindowsAutopilotRecord',
-        'Submit-WindowsAutopilotIdentityRemoval',
-        'Remove-EntraDeviceRecord',
-        'Remove-IntuneManagedDeviceRecord',
-        'Invoke-ScrappedDeviceBatchRemoval',
-        'Invoke-ScrappedDeviceRemoval',
         'Initialize-ProjectExecution',
         'Complete-ProjectExecution',
         'New-DeviceDeletionPlan',

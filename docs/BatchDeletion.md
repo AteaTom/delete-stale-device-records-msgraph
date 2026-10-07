@@ -1,10 +1,10 @@
-# Experimental device deletion batching
+# Device deletion batching
 
-`Individual` remains the default `DeletionTransport`. Opt-in `JsonBatch` uses
-the [Microsoft Graph v1.0 JSON batching contract](https://learn.microsoft.com/graph/json-batching):
-at most 20 independent DELETE requests per envelope, not 20 physical devices.
-`BatchSize` accepts 1-20. Requests and responses are correlated by unique ID,
-not position. Outer HTTP 200 is not proof of successful removal.
+All production deletions use the [Microsoft Graph v1.0 JSON batching
+contract](https://learn.microsoft.com/graph/json-batching): at most 20
+independent DELETE requests per envelope, not 20 physical devices. `BatchSize`
+accepts 1-20. Requests and responses are correlated by unique ID, not
+position. Outer HTTP 200 is not proof of successful removal.
 
 ## Public functions
 
@@ -38,8 +38,8 @@ it does not gate dependent Entra targets. No arbitrary batch
 is used.
 
 Protection, supported client platforms, ambiguity handling and the stale
-180-day minimum remain independent of transport. The approved policy changes
-also apply to the default individual path.
+180-day minimum are enforced before batch planning and are not changed by the
+transport.
 
 ## Confirmation and durable evidence
 
@@ -98,9 +98,9 @@ See [Microsoft throttling guidance](https://learn.microsoft.com/graph/throttling
 
 ## Optional verification
 
-`-VerifyDeletion` requires JsonBatch. This optional final verification is
-separate from mandatory scrapped Autopilot dependency verification, which
-also applies to Individual. After deletion phases, remaining successful IDs are
+`-VerifyDeletion` optionally enables bounded final verification after deletion
+phases. It is separate from dependency handling: an accepted Autopilot DELETE
+is the prerequisite for related Entra removal. Remaining successful IDs are
 read at most three times with five-second intervals. An exact-route read-back
 404 becomes `VerifiedAbsent`; continued visibility becomes
 `VerificationPending`; denied/failed reads become `OutcomeUnknown`, with a
@@ -145,7 +145,7 @@ Run fresh discovery with read scopes only:
 
 ```powershell
 .\src\Invoke-StaleDeviceCleanup.ps1 -TenantId '<tenant-guid>' `
-    -Mode Audit -DaysInactive 1100 -DeletionTransport JsonBatch `
+    -Mode Audit -DaysInactive 1100 `
     -OutputPath '.\output\batch-audit-validation'
 ```
 
@@ -160,7 +160,7 @@ Simulate execution using the same tenant and threshold:
 ```powershell
 .\src\Invoke-StaleDeviceCleanup.ps1 -TenantId '<tenant-guid>' `
     -Mode Automatic -ConfirmDeletion -WhatIf -DaysInactive 1100 `
-    -DeletionTransport JsonBatch -BatchSize 1 `
+    -BatchSize 1 `
     -OutputPath '.\output\batch-whatif-validation'
 ```
 
@@ -186,7 +186,7 @@ Audit and WhatIf. It performs irreversible deletion:
 ```powershell
 $beforeRetry = [int](Get-MgRequestContext).MaxRetry
 .\src\Invoke-StaleDeviceCleanup.ps1 -TenantId '<lab-tenant-guid>' `
-    -Mode Interactive -DaysInactive 180 -DeletionTransport JsonBatch `
+    -Mode Interactive -DaysInactive 180 `
     -BatchSize 1 -VerifyDeletion -OutputPath '.\output\lab-batch-validation'
 $runExitCode = $LASTEXITCODE
 $afterRetry = [int](Get-MgRequestContext).MaxRetry
