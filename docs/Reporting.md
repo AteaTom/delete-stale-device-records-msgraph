@@ -17,7 +17,7 @@ by `Export-ReportCsv`). Every row includes the run's `RunId`.
 | `ExcludedDevices.csv` | Subset with `Decision = Excluded` |
 | `ErrorDevices.csv` | Subset with a non-null `ErrorMessage` |
 | `OnPremisesSyncedReview.csv` | Stale client devices excluded specifically by the default on-premises sync protection; header-only when there are no such devices |
-| `ScrappedDeviceResults.csv` | Object-level Intune/Autopilot targets and Entra objects for review, plus excluded/ambiguous/unmatched serials; empty when the parameter is not supplied |
+| `ScrappedDeviceResults.csv` | Object-level Intune/Autopilot/Entra targets and outcomes, plus excluded/ambiguous/unmatched or lookup-failed serials; empty outside scrapped cleanup |
 | `RunSummary.json` | Machine-readable run outcome (counts, exit code, timestamps) |
 | `ExecutionLog.txt` | Human-readable structured log (DEBUG/INFO/WARNING/ERROR/SUCCESS) |
 | `DeletionPlan.json` | JsonBatch only: tenant/run/workflow, creation time, unique operations, prerequisites and SHA-256 hash; written before confirmation |
@@ -35,12 +35,10 @@ Explicit protection and on-premises sync protection have separate counts.
 No Intune or Autopilot deletion is planned by this workflow.
 
 Scrapped cleanup shows matched serials separately from serials with actual
-Intune/Autopilot DELETE targets. Counts of unique Intune and Autopilot objects
-sum to DELETE operations, not physical devices. Entra review objects appear
-under retained records, with zero Entra DELETE operations. Entra-only matches
-do not increase the destructive-target serial count. Required Intune success
-before Autopilot is displayed explicitly. These are alternatives, not combined
-workflows: supplying `-ScrappedDeviceCsvPath` bypasses stale cleanup.
+Intune/Autopilot/Entra DELETE targets. Counts of unique objects sum to DELETE
+operations, not physical devices. Required Intune success before Autopilot and
+verified Autopilot absence before Entra are displayed explicitly. These are
+alternatives, not combined workflows: `-ScrappedDevices` bypasses stale cleanup.
 
 See `AllEvaluatedDevices.csv` header for the authoritative list; it matches
 the field list documented in the project specification, including
@@ -77,7 +75,10 @@ It also records `TotalOnPremisesSyncedReview` and whether the explicit
 `AllowOnPremisesSyncedDeletion` override was enabled.
 `TotalEntraDevicesAlreadyAbsent` counts batch idempotent completion separately
 from records deleted by this run. Scrapped runs also include
-`TotalScrappedExcludedSerials` and `TotalScrappedEntraReview`.
+`TotalScrappedExcludedSerials` and `TotalScrappedEntraToRemove`.
+Scrapped summaries omit `DaysInactiveThreshold` and `CutoffDateUtc` entirely,
+including empty-input and error runs. `ScrappedWorkflow` explicitly identifies
+the chosen parameter set, not merely the presence of result rows.
 
 `OnPremisesSyncedReview.csv` contains only otherwise-stale devices excluded
 because they are synchronized from on-premises Active Directory. It includes
@@ -90,17 +91,34 @@ does not inspect or modify source Active Directory.
 ## Scrapped-device columns
 
 `ScrappedDeviceResults.csv` includes: `InputSerialNumber`,
-`NormalizedSerialNumber`, `MatchStatus` (`Matched`/`Ambiguous`/`NotFound`/`Excluded`),
+`NormalizedSerialNumber`, `MatchStatus` (`Matched`/`Ambiguous`/`NotFound`/`Excluded`/`LookupFailed`),
 `AmbiguityReason`, `AutopilotIdentityId`, `AutopilotEnrollmentState`,
 `IntuneManagedDeviceId`, `IntuneDeviceName`, `EntraObjectId`,
-`EntraDeviceName`, and per-target `AutopilotRemovalStatus`,
+`EntraDeviceId`, `EntraDeviceName`, `CorrelationMethod`, and per-target `AutopilotRemovalStatus`,
 `IntuneRemovalStatus`, `EntraRemovalStatus`. Scrapped-device Autopilot states
 include `RemovalSubmitted`, `AlreadyRemoved`, `RemovalFailed`, `Declined`,
 `WhatIf`, and `NotApplicable`.
 Intune states include `Removed`, `AlreadyRemoved`, `RemovalFailed`, `OutcomeUnknown`, `Declined`,
 `WhatIf`, `Skipped`, `NotApplicable`, and `NotAttempted`. Autopilot also uses
 `BlockedDependency` when required Intune removal did not succeed.
-Entra objects use `ManualReview`, never `Removed`, in this workflow.
+Entra uses `Removed`, `AlreadyAbsent`, `RemovalFailed`, `BlockedDependency`,
+`WhatIf`, `Declined`, `NotApplicable` and `NotAttempted`.
+`AlreadyAbsent` is not counted as deletion by this run.
+
+`IntuneLookupStatus`, `AutopilotLookupStatus` and `EntraLookupStatus` distinguish
+`Found`, `NotFound`, `SkippedUnsafeCorrelation` and `FailedLookup`. On incomplete
+inventory discovery, earlier successful services report
+`LookupSucceededCorrelationBlocked`; later services report `NotAttempted`.
+Incomplete discovery prevents all writes and does not establish absence.
+Repeated rows share a per-serial `CleanupOutcome`: `Complete`, `Partial`,
+`Blocked`, `Pending`, `Simulated`, `Excluded`, `NotFound`, `LookupFailed` or
+`NotAttempted`. `Complete` requires every target to have a successful or
+already-absent outcome, with Autopilot absence verified. Accepted-but-unverified
+Autopilot removal (including `AlreadyRemoved`) is pending, not complete.
+When optional final verification is requested, continued visibility produces
+`Pending` and denied/failed read-back produces `Blocked` or `Partial`, never
+`Complete`, even when DELETE was accepted. Confirmed unresolved cleanup exits
+nonzero; Audit and WhatIf never claim real cleanup.
 
 `RemovalSubmitted` means the supported Autopilot identity DELETE succeeded.
 It confirms submission, not immediate disappearance from the Autopilot portal;
@@ -108,27 +126,28 @@ the service completes that work asynchronously.
 
 For scrapped-device runs, the completion log and `RunSummary.json` count
 Autopilot submissions, already-absent and failed objects, Intune removals,
-and Entra review objects by unique nonempty object ID, not by expanded CSV row.
+and Entra removed, already-absent, failed and blocked objects by unique nonempty
+object ID, not by expanded CSV row.
 The summary also includes unique input, matched,
 ambiguous, not-found, and error serial counts. This prevents one serial
 expanded across multiple object rows from inflating completion totals.
 
-Collection processing sends one supported Graph request per unique target;
-the workflow does not use Microsoft Graph JSON batching. Each request uses
+Individual processing sends one supported Graph request per unique target;
+opt-in JsonBatch uses the same target/dependency policy. Each request uses
 the existing retry policy for transient failures, and a failed target is
 reported individually while processing continues for unrelated targets.
 
-Only unambiguous matches are reported as `Matched`; duplicate matches remain
-`Ambiguous` even with Autopilot present. Protection, unsupported/missing
-platforms and conflicting identifiers produce `Excluded`, with the reason
-in `AmbiguityReason`. Entra objects are reported for review only.
+Only safely corroborated matches are reported as `Matched`; serial-only
+collisions remain `Ambiguous`. Protection, unsupported/missing platforms,
+synchronization protection and conflicting identifiers produce `Excluded`,
+with the reason in `AmbiguityReason`.
 Only `Matched` rows are ever acted on.
 
 Before mode validation or an interactive deletion prompt, the console summary
 shows unique counts for input and matched serial numbers, the number of
 case-insensitive duplicate CSV rows ignored, exact unique Intune/Autopilot
-records to remove, Entra objects for review, and ambiguous/excluded/not-found
-serials. Blank rows and the optional
+records and Entra objects to remove, and ambiguous/excluded/not-found
+serials. Blank rows and the required
 header are excluded from the duplicate count.
 `ScrappedDeviceResults.csv` is written first so its object-level rows can be
 reviewed before confirmation.
@@ -157,3 +176,9 @@ when no verification result applies, so CSV column selection cannot omit them.
 Denied or unsuccessful read-back never establishes absence. Verification
 uncertainty is logged and results in a non-success run outcome.
 See [BatchDeletion.md](BatchDeletion.md).
+
+Scrapped Autopilot read-back is mandatory before dependent Entra operations,
+not controlled by the optional final `VerifyDeletion` flag. Individual reports
+include its verification status too. Simulations report `NotRequested`, never
+`VerifiedAbsent`. If correlation evidence is gone, `NotFound` is not proof
+that an historical Entra object was deleted.

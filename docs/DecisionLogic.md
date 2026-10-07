@@ -75,26 +75,36 @@ deleted.
 
 ## Scrapped-device serial matching
 
-The `-ScrappedDeviceCsvPath` workflow is intentionally independent from the
+The `-ScrappedDevices` parameter set is intentionally independent from the
 stale-device activity evaluation. It takes the CSV serials as the authoritative
 input, resolves them only against the already-discovered Entra, Intune, and
 Autopilot records, and then exits early before the standard stale-device
 lifecycle executes for that run.
 
+`-DaysInactive` cannot bind in this parameter set and is not used in scrapped
+initialization, logging or summaries. Default input is `src\scrappeddevices.csv`
+with a required `SerialNumber` column. An explicit
+`-AllowLegacyScrappedDeviceFormat` permits the old headerless text format.
+
 CSV serials are deduplicated case-insensitively before correlation. The first
 occurrence and its casing are preserved; each later occurrence is ignored and
 counted as a duplicate CSV row in the summary.
 
-- A serial must identify an unambiguous client device. Duplicate Intune, Entra
-  or Autopilot matches fail closed even with an Autopilot registration.
+- A serial must identify an unambiguous client device. Multiple Intune or
+  Autopilot records require corroborating stable relationships to one device;
+  serial-only collisions and multiple Entra objects for one device ID fail closed.
 - Protected IDs/serials/names, servers, unsupported or missing platforms, and
-  conflicting stable IDs exclude the entire serial.
+  conflicting stable IDs exclude the entire serial. Synchronized Entra records
+  are protected unless the existing explicit advanced override is supplied.
+  Related records with a different serial cannot be bypassed. Conflicting
+  supported platforms also fail closed, including without Autopilot.
 - For a valid match, emit object-level rows for Intune/Autopilot targets and
-  related Entra objects for review.
+  related Entra targets. Stable IDs are resolved before deletion removes the
+  source correlation evidence. Device names never establish a link.
 - If no match is found in any source, the row is marked `NotFound` and no
   deletion is attempted.
 
-The summary shows unique approved Intune/Autopilot targets and Entra review
+The summary shows unique approved Intune/Autopilot/Entra targets
 counts before confirmation, rather than a tenant-wide stale-device summary.
 
 After confirmation, the scrapped-device operation follows this order:
@@ -104,9 +114,26 @@ After confirmation, the scrapped-device operation follows this order:
    DELETE endpoint.
    Failed or declined required Intune removals block Autopilot for the serial.
 3. Treat a successful Autopilot DELETE as submitted, not portal disappearance.
-4. Retain Entra objects for manual review; never delete them in this branch.
-5. Optional JsonBatch verification reads exact successful target IDs with
+4. Read back each accepted Autopilot identity by exact ID, at most three
+   attempts with five-second intervals. Only verified absence permits related
+   Entra deletion. Pending or failed verification blocks dependent Entra
+   operations and produces a non-success result. WhatIf simulates this
+   dependency transition without claiming actual absence or making DELETE calls.
+5. Remove every safely correlated eligible Entra target. Intune or Autopilot
+   prerequisite failure blocks related Entra; independent targets continue.
+6. Optional JsonBatch verification reads exact successful target IDs with
    bounded retries and records absence separately from API success.
+
+Entra deletion here is an intentional exception for explicit physical
+retirement, not routine cleanup after Autopilot deregistration. Microsoft's
+[deregistration guidance](https://learn.microsoft.com/autopilot/registration-overview)
+advises against routine manual Entra deletion. Synchronized devices may
+reappear if their on-premises AD source remains; source AD is never modified.
+
+Without either Intune or Autopilot evidence a serial cannot identify an Entra
+object. NotFound therefore means no reliable match in current discovery, not
+proof of complete historical cleanup. Preserve original reports for manual
+reconciliation; no historical report is implicitly replayed.
 
 ## Decision precedence (evaluated in order per device)
 

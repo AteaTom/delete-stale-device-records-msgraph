@@ -35,14 +35,14 @@ deleting anything.
   (`AutopilotProtected`). They require explicit hardware deregistration.
 - The explicit scrapped-device workflow removes Intune records first, submits
   each unique Autopilot identity through the supported identity DELETE, and
-  leaves related Entra objects for manual review, never routine deletion.
+  removes safely correlated Entra objects only after verified Autopilot absence.
   Failed or declined Intune removal blocks related Autopilot deregistration.
-  It does not wait for eventual Autopilot portal synchronization.
+  Bounded exact-ID read-back gates Entra removal; pending results fail closed.
 - Incomplete discovery (a failed Graph call for an entire data set) blocks
   all deletion for the run.
 - **Intune managed-device records are never deleted** by the activity-based
   stale-device workflow. The only exception is the explicit
-  `-ScrappedDeviceCsvPath` workflow below, which is opt-in per run and acts
+  `-ScrappedDevices` workflow below, which is opt-in per run and acts
   only on serial numbers you provide.
   Intune data is used only as a correlation and activity source.
 
@@ -84,15 +84,18 @@ routed to manual review rather than deleted by stale cleanup. See
 
 For the scrapped-device CSV workflow, the serial-number list is treated as the
 authoritative hardware-retirement input, not permission to bypass protection.
-Duplicate identities/serial matches, conflicting stable identifiers, protected
-devices, servers, unsupported platforms and missing platform evidence fail closed.
-Related Entra objects appear in the report for review only.
+Serial-only collisions, conflicting stable identifiers, protected devices,
+servers, unsupported platforms and missing platform evidence fail closed.
+Multiple records require corroborating stable relationships to one device.
 
 ## Autopilot removal order
 
 Only explicit scrapped hardware can be deregistered: remove Intune records
 first, then submit the Autopilot identity DELETE after successful prerequisites.
-Retain Entra objects for review, following Microsoft's
+Explicit scrapped cleanup then removes safely correlated Entra objects only
+after exact-ID read-back confirms all related Autopilot identities absent.
+This is an intentional hardware-retirement exception to Microsoft's advice
+against routine manual Entra deletion after deregistration:
 [deregistration guidance](https://learn.microsoft.com/autopilot/registration-overview#deregister-a-device). See
 [docs/Architecture.md](docs/Architecture.md).
 
@@ -163,8 +166,8 @@ Each run creates `output\<yyyyMMdd-HHmmss>\` containing
 Before confirmation, the workflow-specific summary shows tenant, mode,
 WhatIf and transport. Stale cleanup lists only planned standalone Entra
 deletions; Autopilot-backed devices appear as retained. Scrapped cleanup
-counts serials with actual targets and unique Intune/Autopilot DELETE
-operations separately, while Entra review records are explicitly retained.
+counts serials with actual targets and unique Intune/Autopilot/Entra DELETE
+operations separately, with dependency verification before Entra deletion.
 Audit and WhatIf clearly indicate that no tenant DELETE requests are sent.
 
 Individual SDK deletions remain the default. `-DeletionTransport JsonBatch`
@@ -197,44 +200,74 @@ from DELETE acceptance and portal synchronization. See
 
 ## Scrapped devices (explicit serial-number removal)
 
-For hardware that has been physically scrapped, maintain a recurring
-CSV/text file with one serial number per line (an optional header row is
-skipped automatically), for example `src/ScrappedDevice.csv`, and pass it
-via `-ScrappedDeviceCsvPath`. This workflow is entirely independent of
-`-DaysInactive` and the stale-device evaluation: when the
-parameter is supplied, the script takes the scrapped-device branch first and
-returns before the standard stale lifecycle flow runs. Explicit hardware
-retirement does not use inactivity as eligibility, but still honors protected
-devices, client-platform scope and unambiguous correlation:
+For physically scrapped hardware, select `-ScrappedDevices`. This separate
+parameter set **does not accept `-DaysInactive`** and never evaluates activity.
+Audit remains the default. Maintain `src\scrappeddevices.csv` (resolved beside
+the script) with a required `SerialNumber` column, or specify
+`-ScrappedDeviceCsvPath` as an override:
+
+```csv
+SerialNumber
+SYNTHETIC-SCRAP-001
+SYNTHETIC-SCRAP-002
+```
+
+The default file is intentionally not populated or committed with tenant data.
+Create it from `config\scrappeddevices.example.csv` and replace the synthetic
+serials with reviewed physical-retirement instructions before use.
 
 ```powershell
-.\src\Invoke-StaleDeviceCleanup.ps1 -Mode Interactive `
-  -ScrappedDeviceCsvPath '.\src\ScrappedDevice.csv'
+.\src\Invoke-StaleDeviceCleanup.ps1 -ScrappedDevices -Mode Audit
+.\src\Invoke-StaleDeviceCleanup.ps1 -ScrappedDevices -Mode Automatic `
+  -ConfirmDeletion -WhatIf
+.\src\Invoke-StaleDeviceCleanup.ps1 -ScrappedDevices -Mode Interactive `
+  -ScrappedDeviceCsvPath '.\src\scrappeddevices.csv'
 ```
 
 Repeated CSV rows are removed case-insensitively before correlation, preserving
 the first occurrence and file order. The summary reports how many duplicate
-rows were ignored; blank rows and the optional header are not counted as
+rows were ignored; blank rows and the required header are not counted as
 duplicates.
 
-An unambiguous serial may target Intune and, for Windows only, Autopilot.
-Entra objects are never deleted by this branch. Duplicate matches remain
-`Ambiguous` even if Autopilot exists. Protected, unsupported, missing-platform
-or conflicting-identifier matches are `Excluded`; nothing matching the serial
-is then deleted. A serial matching nothing is reported as `NotFound`.
+Safely correlated serials may target all three services; only Windows targets
+Autopilot. Multiple records are eligible only when stable relationships
+corroborate one device. Serial-only collisions remain `Ambiguous`. Protected,
+unsupported, missing-platform, synchronized (unless explicitly overridden), or
+conflicting-identifier matches are `Excluded`. Device names never prove identity.
 
 This is the only workflow in the project that removes Intune managed-device
 records, and it only ever acts on the serial numbers you explicitly listed.
 It follows Microsoft's deregistration order by removing unique Intune records
 first and then submitting each unique Autopilot identity through the supported
 identity DELETE only if required Intune removals succeeded. A failed or skipped
-prerequisite blocks Autopilot; Entra objects remain `ManualReview` regardless
-of the deregistration result. Portal synchronization can take several minutes.
+prerequisite blocks dependent operations. Accepted Autopilot deletion is
+`RemovalSubmitted`, not proof of disappearance. Exact-ID read-back uses at
+most three attempts with five-second intervals; only observed absence permits
+Entra deletion. Pending/denied verification blocks Entra and produces a
+non-success result, while independent targets continue. This safety gate is
+mandatory in both transports and is separate from optional `-VerifyDeletion`.
 The workflow uses the same
 Mode/`-WhatIf`/`-ConfirmDeletion` gating as the rest of the tool and does not
 run the standard stale-device lifecycle in the same execution. Before
 confirmation, the console shows the exact unique target counts, and
 `ScrappedDeviceResults.csv` contains the object-level details.
+
+**Breaking migration in 1.2.0:** path-only scrapped commands are rejected
+instead of silently gaining Entra deletion. Add `-ScrappedDevices`, remove
+`-DaysInactive`, and add a `SerialNumber` header. To explicitly retain the old
+headerless input format:
+
+```powershell
+.\src\Invoke-StaleDeviceCleanup.ps1 -ScrappedDevices -Mode Audit `
+  -ScrappedDeviceCsvPath '.\src\ScrappedDevice.csv' `
+  -AllowLegacyScrappedDeviceFormat
+```
+
+This compatibility option changes parsing only; confirmed runs use the new
+all-service policy. Input serials cannot rediscover Entra records after both
+Intune and Autopilot correlation evidence is gone. `NotFound` is not proof that
+the Entra object is absent; preserve earlier reports for manual reconciliation.
+No historical report is automatically replayed or used as deletion authority.
 
 ### Calling the reusable Intune batch-removal helper
 
@@ -267,9 +300,8 @@ $records | Select-Object InputSerialNumber, IntuneManagedDeviceId, IntuneRemoval
 
 The record's status becomes `WhatIf`; non-`Matched` records and records without
 an Intune ID are not removed. For normal tenant cleanup, prefer the
-`-ScrappedDeviceCsvPath` script workflow above: it performs discovery,
-validation, confirmation, dependency ordering, and reporting. Entra objects
-remain available for manual review and are not removed by this workflow.
+`-ScrappedDevices` script workflow above: it performs discovery, validation,
+confirmation, dependency ordering, and reporting for all three services.
 
 Microsoft reference: [Windows Autopilot deregistration guidance](https://learn.microsoft.com/autopilot/registration-overview#deregister-a-device)
 

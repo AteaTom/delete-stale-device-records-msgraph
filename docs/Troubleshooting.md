@@ -30,9 +30,10 @@ when this occurs.
 
 ## Autopilot removal reported but Entra device still exists
 
-This is expected: Autopilot-backed objects are protected from stale cleanup,
-and scrapped cleanup retains Entra records for manual review. Do not delete
-them manually merely because Autopilot deregistration was accepted.
+Autopilot-backed objects are protected from ordinary stale cleanup. Explicit
+`-ScrappedDevices` cleanup permits safely correlated Entra deletion only after
+all dependencies succeed and related Autopilot absence is verified. Do not
+delete Entra manually merely because deregistration was accepted.
 
 For `ScrappedDeviceResults.csv`, `RemovalSubmitted` means the v1.0 Autopilot
 identity DELETE accepted the removal request. The script does not wait for the
@@ -40,7 +41,10 @@ portal to synchronize. Microsoft notes that deregistration can take time; use
 **Sync** and **Refresh** in the Intune Autopilot devices view if the record
 remains visible. `RemovalFailed` means the identity DELETE failed;
 `BlockedDependency` means a required Intune removal did not succeed.
-Entra objects remain `ManualReview` in either case.
+Entra uses `BlockedDependency` if any required operation or verification fails.
+`VerificationPending` means bounded exact-ID read-back still found the
+Autopilot record; it is not a completed cleanup. Independent targets continue.
+Preserve reports and reconcile exact IDs read-only before deciding on a new run.
 
 ## RunSummary planned and completed removal counts differ
 
@@ -86,19 +90,32 @@ Other Graph errors, including permission failures, still fail the operation.
 ## A scrapped-device serial number shows as Ambiguous or NotFound
 
 Check `ScrappedDeviceResults.csv`. `Ambiguous` means the serial number matched
-more than one record in at least one source (e.g. duplicate serial numbers
-across two Autopilot identities); the tool never guesses which one to delete,
+multiple records without enough corroborating stable relationships; the tool
+never guesses which one to delete,
 so nothing is removed for that serial number — resolve the duplicate manually
 in the Intune/Autopilot portal first. `NotFound` means the serial number did
 not match any Autopilot identity, Intune managed device, or Entra device
-object (already removed, or never enrolled) — no action is needed.
+object. Entra serial correlation depends on current Intune/Autopilot
+references. Once those source records are gone, an Entra object may remain
+but can no longer be identified by serial. Preserve earlier result reports;
+NotFound does not establish complete historical cleanup. Historical reports
+are not automatically replayed as deletion input.
 
 ## Scrapped-device Intune removal fails with a permission error
 
 Removing an Intune managed device requires
 `DeviceManagementManagedDevices.ReadWrite.All`, which is only requested when
-`-ScrappedDeviceCsvPath` is supplied in a destructive mode. Re-consent if the
+`-ScrappedDevices` is supplied in a destructive mode. Entra deletion also needs
+`Directory.AccessAsUser.All` and a supported role. Re-consent if the
 account previously only had the read-only Intune scope.
+
+## Scrapped parameter binding or CSV header errors
+
+Use `-ScrappedDevices`, remove `-DaysInactive`, and supply a CSV with a unique
+`SerialNumber` column. Default input is `src\scrappeddevices.csv` beside the
+script. Path-only invocation was intentionally removed in 1.2.0 so existing
+automation cannot silently gain Entra deletion. `-AllowLegacyScrappedDeviceFormat`
+explicitly permits the old headerless input, not the old deletion behavior.
 
 ## A parameter cannot be found that matches parameter name Statistics
 

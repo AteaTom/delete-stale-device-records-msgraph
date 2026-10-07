@@ -43,7 +43,7 @@ Describe 'Parameter validation' {
     It 'reloads an older module when scrapped-device parameters are missing' {
         $scriptContent = Get-Content -LiteralPath $script:scriptPath -Raw
 
-        $scriptContent | Should -Match "requiredModuleVersion = \[version\]'1\.1\.0'"
+        $scriptContent | Should -Match "requiredModuleVersion = \[version\]'1\.2\.0'"
         $scriptContent | Should -Match 'loadedModule\.Version -eq \$requiredModuleVersion'
         $scriptContent | Should -Match "Get-Command -Name 'New-RunSummary'.*ErrorAction SilentlyContinue"
         $scriptContent | Should -Match "newRunSummaryCommand\.Parameters\.ContainsKey\('AllowOnPremisesSyncedDeletion'\)"
@@ -361,12 +361,15 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
         (Get-Content -LiteralPath $statePath -Raw).Trim() | Should -Be '{}'
     }
 
-    It 'executes scrapped-only cleanup with <Transport> and retains Entra objects' -TestCases @(
+    It 'executes scrapped-only cleanup with <Transport> across all services after verified absence' -TestCases @(
         @{ Transport = 'Individual' }, @{ Transport = 'JsonBatch' }
     ) {
         param($Transport)
         $scrappedPath = Join-Path ([System.IO.Path]::GetTempPath()) "scrapped-branch-$(New-Guid).csv"
-        Set-Content -LiteralPath $scrappedPath -Value @('5CD3271HSD')
+        Set-Content -LiteralPath $scrappedPath -Value @('SerialNumber', '5CD3271HSD')
+        Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -ParameterFilter { $Method -eq 'GET' } {
+            [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::NotFound)
+        }
 
         Mock -CommandName Get-MgContext -ModuleName StaleDeviceCleanup -MockWith {
             [PSCustomObject]@{
@@ -396,27 +399,31 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
         Mock -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -MockWith { }
         Mock -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -MockWith { }
 
-        & $script:scriptPath -Mode Automatic -DaysInactive 180 -OutputPath $script:runOutputPath -ConfirmDeletion `
+        & $script:scriptPath -Mode Automatic -ScrappedDevices -OutputPath $script:runOutputPath -ConfirmDeletion `
             -ScrappedDeviceCsvPath $scrappedPath -DeletionTransport $Transport
 
         Assert-MockCalled -CommandName Update-MgDevice -ModuleName StaleDeviceCleanup -Times 0
-        Assert-MockCalled -CommandName Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
         if ($Transport -eq 'Individual') {
+            Assert-MockCalled Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 1
             Assert-MockCalled Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 1
             Assert-MockCalled Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $WindowsAutopilotDeviceIdentityId -eq 'ap1' }
-            Assert-MockCalled Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0
+            Assert-MockCalled Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Method -eq 'GET' }
         } else {
-            Assert-MockCalled Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 2 -Exactly
+            Assert-MockCalled Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
+            Assert-MockCalled Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 3 -Exactly -ParameterFilter { $Method -eq 'POST' }
             Assert-MockCalled Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 0
             Assert-MockCalled Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 0
         }
         $runFolder = Get-ChildItem -Path $script:runOutputPath -Directory | Select-Object -First 1
         $executionLog = Get-Content -LiteralPath (Join-Path $runFolder.FullName 'ExecutionLog.txt') -Raw
-        $executionLog | Should -Match 'Scrapped device removals completed: Autopilot accepted=1, already absent=0, failed=0; Intune removed=1, already absent=0, failed=0; Entra removed=0, already absent=0, failed=0, blocked by Autopilot=0\.'
+        $executionLog | Should -Match 'Scrapped device removals completed: Autopilot accepted=1, already absent=0, failed=0; Intune removed=1, already absent=0, failed=0; Entra removed=1, already absent=0, failed=0, blocked by Autopilot=0\.'
         $runSummary = Get-Content -LiteralPath (Join-Path $runFolder.FullName 'RunSummary.json') -Raw | ConvertFrom-Json
         $runSummary.TotalScrappedAutopilotRemovalSubmitted | Should -Be 1
         $runSummary.TotalScrappedIntuneDevicesRemoved | Should -Be 1
-        $runSummary.TotalScrappedEntraDevicesRemoved | Should -Be 0
+        $runSummary.TotalScrappedEntraDevicesRemoved | Should -Be 1
+        $runSummary.TotalScrappedComplete | Should -Be 1
+        $runSummary.PSObject.Properties.Name | Should -Not -Contain 'DaysInactiveThreshold'
+        $runSummary.PSObject.Properties.Name | Should -Not -Contain 'CutoffDateUtc'
         $runSummary.TotalErrors | Should -Be 0
 
         Remove-Item -Path $scrappedPath -Force -ErrorAction SilentlyContinue
@@ -424,7 +431,7 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
 
     It 'continues after an individual removal failure and exits with code 6' {
         $scrappedPath = Join-Path ([System.IO.Path]::GetTempPath()) "scrapped-partial-$(New-Guid).csv"
-        Set-Content -LiteralPath $scrappedPath -Value @('SERIAL-FAIL', 'SERIAL-SUCCEED')
+        Set-Content -LiteralPath $scrappedPath -Value @('SerialNumber', 'SERIAL-FAIL', 'SERIAL-SUCCEED')
 
         Mock -CommandName Get-MgContext -ModuleName StaleDeviceCleanup -MockWith {
             [PSCustomObject]@{
@@ -434,7 +441,7 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
                     'Device.Read.All',
                     'DeviceManagementManagedDevices.Read.All',
                     'DeviceManagementServiceConfig.Read.All',
-                    'Device.ReadWrite.All',
+                    'Directory.AccessAsUser.All',
                     'DeviceManagementManagedDevices.ReadWrite.All',
                     'DeviceManagementServiceConfig.ReadWrite.All'
                 )
@@ -450,7 +457,7 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
             if ($ManagedDeviceId -eq 'intune-fail') { throw [System.Exception]::new('403 Forbidden') }
         }
 
-        & $script:scriptPath -Mode Automatic -DaysInactive 180 -OutputPath $script:runOutputPath `
+        & $script:scriptPath -Mode Automatic -ScrappedDevices -OutputPath $script:runOutputPath `
             -ConfirmDeletion -ScrappedDeviceCsvPath $scrappedPath
 
         Assert-MockCalled -CommandName Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 2
@@ -468,7 +475,7 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
 
     It 'shows the scrapped-device summary before interactive deletion confirmation' {
         $scrappedPath = Join-Path ([System.IO.Path]::GetTempPath()) "scrapped-summary-$(New-Guid).csv"
-        Set-Content -LiteralPath $scrappedPath -Value @('5CD3271HSD', '5cd3271hsd')
+        Set-Content -LiteralPath $scrappedPath -Value @('SerialNumber', '5CD3271HSD', '5cd3271hsd')
         $global:scrappedSummaryShown = $false
 
         Mock -CommandName Get-MgContext -ModuleName StaleDeviceCleanup -MockWith {
@@ -500,7 +507,7 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
             return ''
         }
 
-        & $script:scriptPath -Mode Interactive -DaysInactive 180 -OutputPath $script:runOutputPath -ScrappedDeviceCsvPath $scrappedPath
+        & $script:scriptPath -Mode Interactive -ScrappedDevices -OutputPath $script:runOutputPath -ScrappedDeviceCsvPath $scrappedPath
 
         Assert-MockCalled -CommandName Read-Host -ModuleName StaleDeviceCleanup -Times 1
         $global:scrappedSummaryLines | Should -Contain '  Duplicate CSV rows ignored:    1'
