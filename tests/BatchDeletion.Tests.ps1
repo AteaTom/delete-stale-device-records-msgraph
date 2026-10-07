@@ -34,7 +34,7 @@ BeforeAll {
 Describe 'Guarded JSON batch deletion' {
     BeforeEach {
         $script:journalPath = Join-Path $TestDrive "$([guid]::NewGuid()).jsonl"
-        $script:logPath = Join-Path $TestDrive 'batch.log'
+        $script:logPath = Join-Path $TestDrive "$([guid]::NewGuid()).log"
         $script:plan = New-DeviceDeletionPlan -TenantId 'tenant1' -RunId 'run1' -Workflow Stale -Records (New-BatchTestRecords)
         Mock Get-MgContext -ModuleName StaleDeviceCleanup {
             [PSCustomObject]@{
@@ -66,6 +66,24 @@ Describe 'Guarded JSON batch deletion' {
         $script:invoke.Mode = 'Audit'
         (Invoke-DeviceDeletionPlan @script:invoke).Status | Should -Be 'NotAttempted'
         Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0
+    }
+
+    It 'sanitizes verification errors before persisting them in journal and device reports' {
+        Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -ParameterFilter { $Method -eq 'GET' } {
+            throw 'Read-back failed: client_secret="synthetic-private-value"'
+        }
+        $results = @(Invoke-DeviceDeletionPlan @script:invoke -VerifyDeletion)
+        $results[0].Status | Should -Be Removed
+        $results[0].VerificationStatus | Should -Be OutcomeUnknown
+        $results[0].ErrorMessage | Should -Match 'Read-back failed'
+        $results[0].ErrorMessage | Should -Not -Match 'synthetic-private-value'
+        (Get-Content $script:journalPath -Raw) | Should -Not -Match 'synthetic-private-value'
+        $records = New-BatchTestRecords
+        Set-DeviceDeletionResults -Workflow Stale -Records $records -Results $results
+        Export-ReportCsv -InputObject $records -Path (Join-Path $TestDrive 'ErrorDevices.csv')
+        (Get-Content (Join-Path $TestDrive 'ErrorDevices.csv') -Raw) | Should -Not -Match 'synthetic-private-value'
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1 -Exactly -ParameterFilter { $Method -eq 'POST' }
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1 -Exactly -ParameterFilter { $Method -eq 'GET' }
     }
 
     It 'never submits without explicit confirmation' {
@@ -281,6 +299,10 @@ Describe 'Guarded JSON batch deletion' {
             [PSCustomObject]@{ responses = @([PSCustomObject]@{ id = 'entra-obj0'; status = $Code }) }
         }.GetNewClosure()
         (Invoke-DeviceDeletionPlan @script:invoke -MaxAttempts 2).Status | Should -Be 'RemovalFailed'
+        $log = Get-Content $script:logPath -Raw
+        $log | Should -Match 'Event=BatchRetry.*Targets=1'
+        ([regex]::Matches($log, 'Event=ActionAttention')).Count | Should -Be 1
+        $log | Should -Match 'Outcome=RemovalFailed.*Attempts=2'
         Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 2 -Exactly
     }
 
@@ -327,6 +349,8 @@ Describe 'Guarded JSON batch deletion' {
         $result = Invoke-DeviceDeletionPlan @script:invoke
         $result.Status | Should -Be 'RemovalFailed'
         $result.ErrorMessage | Should -Match '400'
+        $log = Get-Content $script:logPath -Raw
+        $log | Should -Match 'Event=ActionAttention.*ObjectId=obj0.*Outcome=RemovalFailed.*HTTP=400'
         Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1 -Exactly
     }
 

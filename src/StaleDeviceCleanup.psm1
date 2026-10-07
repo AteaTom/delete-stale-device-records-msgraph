@@ -38,15 +38,18 @@ function Write-CleanupLog {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Message,
-        [ValidateSet('DEBUG', 'INFO', 'WARNING', 'ERROR', 'SUCCESS')][string]$Level = 'INFO',
+        [ValidateSet('DEBUG', 'VERBOSE', 'INFO', 'WARNING', 'ERROR', 'SUCCESS')][string]$Level = 'INFO',
         [Parameter(Mandatory)][string]$LogPath
     )
 
+    $Message = ConvertTo-CleanupLogText -Text $Message -EscapeLine
+    if ($Level -eq 'DEBUG') { Write-Debug $Message; return }
+    if ($Level -eq 'VERBOSE') { Write-Verbose $Message; return }
     $timestamp = (Get-Date).ToUniversalTime().ToString('o')
     $line = "[$timestamp] [$Level] $Message"
 
     try {
-        Add-Content -LiteralPath $LogPath -Value $line -Encoding utf8
+        Add-Content -LiteralPath $LogPath -Value $line -Encoding utf8 -ErrorAction Stop
     } catch {
         Write-Warning "Failed to write to log file '$LogPath': $($_.Exception.Message)"
     }
@@ -57,6 +60,21 @@ function Write-CleanupLog {
         'SUCCESS' { Write-Verbose $Message }
         default { Write-Verbose $Message }
     }
+}
+
+function ConvertTo-CleanupLogText {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([AllowNull()][string]$Text, [switch]$EscapeLine)
+
+    $textValue = [regex]::Replace([string]$Text, '(?i)\bBearer\s+[^\s",;]+', '[REDACTED]')
+    $textValue = [regex]::Replace($textValue,
+        '(?i)((?:access_token|refresh_token|client_secret|password|authorization)\s*["'']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|''(?:''''|[^''])*''|[^\s"'',;}]+)',
+        '$1[REDACTED]')
+    if ($EscapeLine) {
+        return $textValue.Replace('\', '\\').Replace('"', '\"').Replace("`r", '\r').Replace("`n", '\n')
+    }
+    return $textValue
 }
 
 #endregion Logging
@@ -109,7 +127,7 @@ function Connect-DeviceCleanupGraph {
     }
     if ($TenantId) { $connectParams['TenantId'] = $TenantId }
 
-    Write-CleanupLog -Message "Connecting to Microsoft Graph (requested scopes: $($Scopes -join ', '))." -Level INFO -LogPath $LogPath
+    Write-CleanupLog -Message "Connecting to Microsoft Graph (requested scopes: $($Scopes -join ', '))." -Level VERBOSE -LogPath $LogPath
     Connect-MgGraph @connectParams | Out-Null
 
     $context = Get-MgContext
@@ -156,6 +174,33 @@ function Test-GraphPermissions {
 
 #region Retry logic
 
+function Get-GraphResponseErrorText {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][object]$Body)
+
+    if ($Body -is [string]) {
+        try {
+            $Body = ConvertFrom-Json -InputObject $Body -ErrorAction Stop
+        } catch {
+            Write-Debug 'Graph error detail is not valid JSON; raw response omitted.'
+            return 'Unparseable Graph error detail (raw response omitted).'
+        }
+    }
+    $errorBody = if ($Body -is [System.Collections.IDictionary]) { $Body['error'] }
+        elseif ($Body.PSObject.Properties['error']) { $Body.error }
+    if (-not $errorBody) { return 'Graph response body omitted (no error code/message).' }
+    $details = @(
+        foreach ($field in 'code', 'message') {
+            $value = if ($errorBody -is [System.Collections.IDictionary]) { $errorBody[$field] }
+                elseif ($errorBody.PSObject.Properties[$field]) { $errorBody.$field }
+            if ($value -is [string] -and $value) { $value }
+        }
+    )
+    if (-not $details.Count) { return 'Graph response body omitted (no error code/message).' }
+    return ConvertTo-CleanupLogText -Text ($details -join ': ')
+}
+
 function Get-GraphErrorMessage {
     [CmdletBinding()]
     [OutputType([string])]
@@ -167,6 +212,9 @@ function Get-GraphErrorMessage {
     if ($ErrorRecord.Exception.Message) { $messages.Add($ErrorRecord.Exception.Message.Trim()) }
     if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) {
         $detail = $ErrorRecord.ErrorDetails.Message.Trim()
+        if ($detail.StartsWith('{') -or $detail.StartsWith('[')) {
+            $detail = Get-GraphResponseErrorText -Body $detail
+        }
         if ($detail -and -not $messages.Contains($detail)) { $messages.Add($detail) }
     }
 
@@ -176,7 +224,7 @@ function Get-GraphErrorMessage {
             if ($content) {
                 $responseBody = $content.ReadAsStringAsync().GetAwaiter().GetResult()
                 if ($responseBody) {
-                    $responseBody = $responseBody.Trim()
+                    $responseBody = Get-GraphResponseErrorText -Body $responseBody.Trim()
                     if (-not $messages.Contains($responseBody)) { $messages.Add($responseBody) }
                 }
             }
@@ -185,7 +233,7 @@ function Get-GraphErrorMessage {
         }
     }
 
-    return ($messages -join ' | ')
+    return ConvertTo-CleanupLogText -Text ($messages -join ' | ')
 }
 
 function Invoke-GraphWithRetry {
@@ -225,6 +273,7 @@ function Invoke-GraphWithRetry {
             if (-not $isTransient -or $attempt -ge $MaxRetries) {
                 if ($LogPath -and -not $SuppressErrorLog) {
                     Write-CleanupLog -Message "Graph operation '$OperationName' failed after $attempt attempt(s): $message" -Level ERROR -LogPath $LogPath
+                    $errorRecord.Exception.Data['CleanupErrorLogged'] = $true
                 }
                 throw
             }
@@ -273,7 +322,7 @@ function Get-EntraDeviceRecords {
         'IsManaged', 'IsCompliant', 'Manufacturer', 'Model'
     )
 
-    Write-CleanupLog -Message 'Retrieving Microsoft Entra ID device records.' -Level INFO -LogPath $LogPath
+    Write-CleanupLog -Message 'Retrieving Microsoft Entra ID device records.' -Level VERBOSE -LogPath $LogPath
     $devices = Invoke-GraphWithRetry -OperationName 'Get-MgDevice' -LogPath $LogPath -ScriptBlock {
         Get-MgDevice -All -Property $properties -ErrorAction Stop
     }
@@ -297,7 +346,7 @@ function Get-IntuneManagedDeviceRecords {
         [string]$LogPath
     )
 
-    Write-CleanupLog -Message 'Retrieving Intune managed-device records.' -Level INFO -LogPath $LogPath
+    Write-CleanupLog -Message 'Retrieving Intune managed-device records.' -Level VERBOSE -LogPath $LogPath
     $devices = Invoke-GraphWithRetry -OperationName 'Get-MgDeviceManagementManagedDevice' -LogPath $LogPath -ScriptBlock {
         Get-MgDeviceManagementManagedDevice -All -ErrorAction Stop
     }
@@ -320,7 +369,7 @@ function Get-WindowsAutopilotRecords {
         [string]$LogPath
     )
 
-    Write-CleanupLog -Message 'Retrieving Windows Autopilot device identity records.' -Level INFO -LogPath $LogPath
+    Write-CleanupLog -Message 'Retrieving Windows Autopilot device identity records.' -Level VERBOSE -LogPath $LogPath
     $devices = Invoke-GraphWithRetry -OperationName 'Get-MgDeviceManagementWindowsAutopilotDeviceIdentity' -LogPath $LogPath -ScriptBlock {
         Get-MgDeviceManagementWindowsAutopilotDeviceIdentity -All -ErrorAction Stop
     }
@@ -983,6 +1032,8 @@ function Export-CleanupReports {
 
     $candidates = @($AllEvaluatedDevices | Where-Object Decision -eq 'Candidate')
     $excluded = @($AllEvaluatedDevices | Where-Object Decision -eq 'Excluded')
+    $autopilotProtected = @($excluded | Where-Object ReasonCode -eq 'AutopilotProtected')
+    $otherExcluded = @($excluded | Where-Object ReasonCode -notin 'OnPremisesSyncProtected', 'AutopilotProtected')
     $manualReview = @($AllEvaluatedDevices | Where-Object Decision -eq 'ManualReview')
     $ambiguous = @($AllEvaluatedDevices | Where-Object MatchStatus -eq 'Ambiguous')
     $errors = @($AllEvaluatedDevices | Where-Object { $_.ErrorMessage })
@@ -994,7 +1045,7 @@ function Export-CleanupReports {
         'ActivitySource', 'DaysInactive', 'CutoffDateUtc', 'IntunePresent',
         'IntuneManagedDeviceId', 'IntuneSerialNumber', 'AutopilotPresent',
         'AutopilotIdentityId', 'AutopilotSerialNumber', 'MatchStatus', 'MatchConfidence',
-        'Decision', 'ReasonCode', 'ReasonDescription'
+        'Decision', 'ReasonCode', 'ReasonDescription', 'MatchMethod', 'EntraAction', 'EntraRemovalStatus', 'ErrorMessage'
     )
     $onPremisesReviewHeaders = @($onPremisesReviewFields + 'SourceADDeletionSafety')
     $onPremisesSyncReview = @(
@@ -1008,9 +1059,77 @@ function Export-CleanupReports {
     Export-ReportCsv -InputObject $deleted -Path (Join-Path $OutputPath 'DeletedDevices.csv')
     Export-ReportCsv -InputObject $manualReview -Path (Join-Path $OutputPath 'UnknownDevices.csv')
     Export-ReportCsv -InputObject $ambiguous -Path (Join-Path $OutputPath 'AmbiguousMatches.csv')
-    Export-ReportCsv -InputObject $excluded -Path (Join-Path $OutputPath 'ExcludedDevices.csv')
+    Export-ReportCsv -InputObject $otherExcluded -Path (Join-Path $OutputPath 'ExcludedDevices.csv')
     Export-ReportCsv -InputObject $errors -Path (Join-Path $OutputPath 'ErrorDevices.csv')
     Export-ReportCsv -InputObject $onPremisesSyncReview -Headers $onPremisesReviewHeaders -Path (Join-Path $OutputPath 'OnPremisesSyncedReview.csv')
+    Export-ReportCsv -InputObject $onPremisesSyncReview -Headers $onPremisesReviewHeaders -Path (Join-Path $OutputPath 'ADSyncedDevices.csv')
+    $protectionFields = @(
+        'RunId', 'EvaluationTimestampUtc', 'DeviceName', 'Platform', 'EntraObjectId', 'EntraDeviceId',
+        'IntuneManagedDeviceId', 'IntuneSerialNumber', 'AutopilotIdentityId', 'AutopilotSerialNumber',
+        'OnPremisesSyncEnabled', 'AutopilotPresent', 'MatchStatus', 'MatchMethod', 'MatchConfidence',
+        'EffectiveLastActivityUtc', 'ActivitySource', 'DaysInactive', 'CutoffDateUtc',
+        'Decision', 'ReasonCode', 'ReasonDescription', 'EntraAction', 'EntraRemovalStatus', 'ErrorMessage'
+    )
+    Export-ReportCsv -InputObject @($autopilotProtected | Select-Object -Property $protectionFields) `
+        -Headers $protectionFields -Path (Join-Path $OutputPath 'AutopilotProtectedDevices.csv')
+}
+
+function Get-CleanupActionRecords {
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param(
+        [AllowNull()][PSCustomObject]$Plan,
+        [AllowEmptyCollection()][object[]]$Results = @(),
+        [AllowEmptyCollection()][object[]]$Records = @()
+    )
+
+    if (-not $Plan) { return @() }
+    $byId = @{}
+    foreach ($result in $Results) { $byId[$result.Id] = $result }
+    $finalizedUtc = [datetime]::UtcNow.ToString('o')
+    foreach ($operation in $Plan.Operations) {
+        $idField = switch ($operation.Resource) {
+            Entra { 'EntraObjectId' }
+            Intune { 'IntuneManagedDeviceId' }
+            Autopilot { 'AutopilotIdentityId' }
+        }
+        $related = @($Records | Where-Object { $_.PSObject.Properties[$idField] -and $_.$idField -eq $operation.ObjectId })
+        $names = @(
+            foreach ($row in $related) {
+                foreach ($field in 'DeviceName', 'EntraDeviceName', 'IntuneDeviceName') {
+                    if ($row.PSObject.Properties[$field] -and $row.$field) { $row.$field }
+                }
+            }
+        )
+        $serials = @(
+            foreach ($row in $related) {
+                foreach ($field in 'IntuneSerialNumber', 'AutopilotSerialNumber', 'InputSerialNumber') {
+                    if ($row.PSObject.Properties[$field] -and $row.$field) { $row.$field }
+                }
+            }
+        )
+        $deviceIds = @($related | Where-Object { $_.PSObject.Properties['EntraDeviceId'] -and $_.EntraDeviceId } |
+            Select-Object -ExpandProperty EntraDeviceId -Unique)
+        $result = $byId[$operation.Id]
+        [PSCustomObject][ordered]@{
+            RunId = $Plan.RunId
+            Workflow = $Plan.Workflow
+            FinalizedTimestampUtc = $finalizedUtc
+            OperationId = $operation.Id
+            Resource = $operation.Resource
+            ObjectId = $operation.ObjectId
+            DeviceName = (@($names | Sort-Object -Unique) -join '; ')
+            EntraDeviceId = ($deviceIds -join '; ')
+            SerialNumber = (@($serials | Sort-Object -Unique) -join '; ')
+            Action = 'Delete'
+            ReasonCode = if ($Plan.Workflow -eq 'Stale') { 'Stale' } else { 'ExplicitScrappedCleanup' }
+            Outcome = if ($result) { $result.Status } else { 'NotAttempted' }
+            Attempts = if ($result) { $result.Attempts } else { 0 }
+            HttpStatus = if ($result -and $result.HttpStatus) { $result.HttpStatus } else { $null }
+            VerificationStatus = if ($result) { $result.VerificationStatus } else { 'NotRequested' }
+            ErrorMessage = if ($result) { ConvertTo-CleanupLogText -Text $result.ErrorMessage } else { '' }
+        }
+    }
 }
 
 function New-RunSummary {
@@ -1030,6 +1149,9 @@ function New-RunSummary {
         [Parameter(Mandatory, ParameterSetName = 'Scrapped')][switch]$ScrappedDevices,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$AllEvaluatedDevices,
         [AllowEmptyCollection()][object[]]$ScrappedDeviceRecords = @(),
+        [AllowEmptyCollection()][object[]]$ActionRecords = @(),
+        [string]$TenantId = '',
+        [ValidateRange(0, [int]::MaxValue)][int]$RunErrorCount = 0,
         [bool]$AllowOnPremisesSyncedDeletion = $false,
         [bool]$WhatIfMode = $false,
         [bool]$ConfirmationGranted = $false,
@@ -1064,6 +1186,7 @@ function New-RunSummary {
 
     $summary = [ordered]@{
         RunId                     = $RunId
+        TenantId                  = $TenantId
         Mode                      = $Mode
         WhatIfMode                = $WhatIfMode
         StartTimeUtc              = $StartTimeUtc.ToString('o')
@@ -1101,7 +1224,42 @@ function New-RunSummary {
         TotalErrors               = $errors.Count + $scrappedErrorSerials.Count
         ConfirmationGranted       = $ConfirmationGranted
         ExitCode                  = $ExitCode
+        TotalRunErrors            = $RunErrorCount
     }
+    $summary.TotalADSyncedDevices = $onPremisesSyncReview.Count
+    $summary.TotalAutopilotProtectedDevices = @($excluded | Where-Object ReasonCode -eq 'AutopilotProtected').Count
+    $summary.TotalOtherExcludedDevices = $excluded.Count - $summary.TotalADSyncedDevices - $summary.TotalAutopilotProtectedDevices
+    $summary.ExclusionsByReason = [ordered]@{}
+    foreach ($group in @($excluded | Group-Object ReasonCode | Sort-Object Name)) {
+        $summary.ExclusionsByReason[$group.Name] = $group.Count
+    }
+    $summary.ManualReviewByReason = [ordered]@{}
+    foreach ($group in @($manualReview | Group-Object ReasonCode | Sort-Object Name)) {
+        $summary.ManualReviewByReason[$group.Name] = $group.Count
+    }
+    $summary.ScrappedExclusionsByReason = [ordered]@{}
+    foreach ($group in @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'Excluded' | Group-Object AmbiguityReason | Sort-Object Name)) {
+        $summary.ScrappedExclusionsByReason[$group.Name] = @($group.Group | Select-Object -ExpandProperty NormalizedSerialNumber -Unique).Count
+    }
+    $summary.TotalPlannedActions = $ActionRecords.Count
+    $summary.TotalAttemptedActions = @($ActionRecords | Where-Object Attempts -gt 0).Count
+    $summary.TotalRetryAttempts = [int](($ActionRecords | ForEach-Object { [Math]::Max(0, $_.Attempts - 1) } | Measure-Object -Sum).Sum)
+    $summary.ActionOutcomes = [ordered]@{}
+    foreach ($status in 'Removed', 'RemovalSubmitted', 'AlreadyAbsent', 'AlreadyRemoved', 'RemovalFailed',
+        'OutcomeUnknown', 'BlockedDependency', 'WhatIf', 'Declined', 'NotAttempted') {
+        $summary.ActionOutcomes[$status] = @($ActionRecords | Where-Object Outcome -eq $status).Count
+    }
+    $summary.ActionsByResource = [ordered]@{}
+    foreach ($resource in 'Entra', 'Intune', 'Autopilot') {
+        $resourceRows = @($ActionRecords | Where-Object Resource -eq $resource)
+        $counts = [ordered]@{ Planned = $resourceRows.Count; Attempted = @($resourceRows | Where-Object Attempts -gt 0).Count }
+        foreach ($status in $summary.ActionOutcomes.Keys) {
+            $counts[$status] = @($resourceRows | Where-Object Outcome -eq $status).Count
+        }
+        $summary.ActionsByResource[$resource] = $counts
+    }
+    $summary.TotalVerificationPending = @($ActionRecords | Where-Object VerificationStatus -eq 'VerificationPending').Count
+    $summary.TotalVerificationUnknown = @($ActionRecords | Where-Object VerificationStatus -eq 'OutcomeUnknown').Count
     if ($PSCmdlet.ParameterSetName -eq 'Inactivity') {
         $summary.CutoffDateUtc = $CutoffDateUtc.ToString('o')
         $summary.DaysInactiveThreshold = $DaysInactive
@@ -1636,13 +1794,42 @@ function Complete-ProjectExecution {
     param(
         [Parameter(Mandatory)][PSCustomObject]$RunSummary,
         [Parameter(Mandatory)][string]$OutputPath,
-        [Parameter(Mandatory)][string]$LogPath
+        [Parameter(Mandatory)][string]$LogPath,
+        [AllowEmptyCollection()][object[]]$ActionRecords = @()
     )
 
     $summaryPath = Join-Path -Path $OutputPath -ChildPath 'RunSummary.json'
     $RunSummary | ConvertTo-Json -Depth 6 | Set-Content -Path $summaryPath -Encoding utf8
-
-    Write-CleanupLog -Message "Run completed. ExitCode=$($RunSummary.ExitCode). Summary written to $summaryPath." -Level INFO -LogPath $LogPath
+    $actionHeaders = @('RunId', 'Workflow', 'FinalizedTimestampUtc', 'OperationId', 'Resource', 'ObjectId',
+        'DeviceName', 'EntraDeviceId', 'SerialNumber', 'Action', 'ReasonCode', 'Outcome', 'Attempts', 'HttpStatus', 'VerificationStatus', 'ErrorMessage')
+    Export-ReportCsv -InputObject $ActionRecords -Headers $actionHeaders -Path (Join-Path $OutputPath 'ActionResults.csv')
+    $lines = @(
+        "Run summary: RunId=$($RunSummary.RunId) Tenant=$($RunSummary.TenantId) Workflow=$(if ($RunSummary.ScrappedWorkflow) { 'Scrapped' } else { 'Stale' }) Mode=$($RunSummary.Mode) WhatIf=$($RunSummary.WhatIfMode) ConfirmationGranted=$($RunSummary.ConfirmationGranted) DiscoveryComplete=$($RunSummary.DiscoveryComplete) ExitCode=$($RunSummary.ExitCode)"
+    )
+    if ($RunSummary.ScrappedWorkflow) {
+        $lines += "Scrapped serials: Input=$($RunSummary.TotalScrappedSerials) Matched=$($RunSummary.TotalScrappedMatchedSerials) Excluded=$($RunSummary.TotalScrappedExcludedSerials) Ambiguous=$($RunSummary.TotalScrappedAmbiguousSerials) NotFound=$($RunSummary.TotalScrappedNotFoundSerials) Errors=$($RunSummary.TotalScrappedErrors)"
+        $lines += "Scrapped exclusions: $(@($RunSummary.ScrappedExclusionsByReason.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join '; ')"
+        $lines += "Scrapped cleanup: $(@('Complete', 'Partial', 'Blocked', 'Pending', 'Simulated', 'Excluded', 'NotFound', 'LookupFailed', 'NotAttempted' | ForEach-Object { "$_=$($RunSummary.("TotalScrapped$_"))" }) -join '; ')"
+    } else {
+        $lines += "Evaluated=$($RunSummary.TotalEvaluated) Candidates=$($RunSummary.TotalCandidates) Excluded=$($RunSummary.TotalExcluded) ManualReview=$($RunSummary.TotalManualReview)"
+        $lines += "Exclusions: $(@($RunSummary.ExclusionsByReason.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join '; ')"
+        $lines += "Manual review: $(@($RunSummary.ManualReviewByReason.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join '; ')"
+    }
+    $lines += "Actions: Planned=$($RunSummary.TotalPlannedActions) Attempted=$($RunSummary.TotalAttemptedActions) RetryAttempts=$($RunSummary.TotalRetryAttempts); $(@($RunSummary.ActionOutcomes.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join '; ')"
+    if ($RunSummary.ScrappedWorkflow) {
+        foreach ($resource in $RunSummary.ActionsByResource.Keys) {
+            $counts = $RunSummary.ActionsByResource[$resource]
+            if ($counts.Planned -gt 0) {
+                $lines += "Actions [$resource]: $(@($counts.GetEnumerator() | Where-Object Value -gt 0 | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join '; ')"
+            }
+        }
+    }
+    $lines += "VerificationPending=$($RunSummary.TotalVerificationPending) VerificationUnknown=$($RunSummary.TotalVerificationUnknown) DeviceOrSerialErrors=$($RunSummary.TotalErrors) RunErrors=$($RunSummary.TotalRunErrors)"
+    $lines += "Reports: $OutputPath"
+    foreach ($line in $lines) {
+        Write-CleanupLog -Message $line -Level INFO -LogPath $LogPath
+        Write-Host $line
+    }
 }
 
 #endregion Execution lifecycle
@@ -1669,6 +1856,7 @@ Export-ModuleMember -Function @(
     'Request-DeletionConfirmation',
     'Export-ReportCsv',
     'Export-CleanupReports',
+    'Get-CleanupActionRecords',
     'New-RunSummary',
     'Set-ScrappedDeviceOutcomes',
     'Get-ScrappedDeviceSerialNumbers',

@@ -172,6 +172,13 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
         $runFolder = Get-ChildItem $script:runOutputPath -Directory | Select-Object -First 1
         (Import-Csv (Join-Path $runFolder.FullName 'AllEvaluatedDevices.csv'))[0].EntraRemovalStatus | Should -Be 'Removed'
         Test-Path (Join-Path $runFolder.FullName 'DeletionPlan.json') | Should -BeTrue
+        $summary = Get-Content (Join-Path $runFolder.FullName 'RunSummary.json') -Raw | ConvertFrom-Json
+        $summary.TotalAttemptedActions | Should -Be 1
+        $summary.ActionOutcomes.Removed | Should -Be 1
+        $summary.ActionOutcomes.RemovalSubmitted | Should -Be 0
+        $actions = @(Import-Csv (Join-Path $runFolder.FullName 'ActionResults.csv'))
+        $actions.Count | Should -Be $summary.TotalPlannedActions
+        $actions[0].Outcome | Should -Be Removed
         Test-Path (Join-Path $runFolder.FullName 'DeletionJournal.jsonl') | Should -BeTrue
     }
 
@@ -205,6 +212,18 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
         Assert-MockCalled Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
         $runFolder = Get-ChildItem $script:runOutputPath -Directory | Select-Object -First 1
         Test-Path (Join-Path $runFolder.FullName 'DeletionPlan.json') | Should -BeTrue
+        $summary = Get-Content (Join-Path $runFolder.FullName 'RunSummary.json') -Raw | ConvertFrom-Json
+        $summary.TotalAttemptedActions | Should -Be 0
+        $summary.ActionOutcomes.Removed | Should -Be 0
+        $summary.ActionOutcomes.RemovalSubmitted | Should -Be 0
+        $actions = @(Import-Csv (Join-Path $runFolder.FullName 'ActionResults.csv'))
+        $actions.Count | Should -Be $summary.TotalPlannedActions
+        if ($Scenario -eq 'WhatIf') {
+            $summary.ActionOutcomes.WhatIf | Should -Be $summary.TotalPlannedActions
+            $actions[0].Outcome | Should -Be WhatIf
+        } else {
+            $summary.ActionOutcomes.NotAttempted | Should -Be $summary.TotalPlannedActions
+        }
     }
 
     It 'persists uncertain batch outcomes and non-success summary on lost response' {
@@ -212,7 +231,15 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
         & $script:scriptPath -Mode Automatic -ConfirmDeletion -OutputPath $script:runOutputPath
         $runFolder = Get-ChildItem $script:runOutputPath -Directory | Select-Object -First 1
         (Import-Csv (Join-Path $runFolder.FullName 'AllEvaluatedDevices.csv'))[0].EntraRemovalStatus | Should -Be 'OutcomeUnknown'
-        (Get-Content (Join-Path $runFolder.FullName 'RunSummary.json') -Raw | ConvertFrom-Json).ExitCode | Should -Not -Be 0
+        $summary = Get-Content (Join-Path $runFolder.FullName 'RunSummary.json') -Raw | ConvertFrom-Json
+        $summary.ExitCode | Should -Not -Be 0
+        $summary.TotalAttemptedActions | Should -Be 1
+        $summary.ActionOutcomes.OutcomeUnknown | Should -Be 1
+        $summary.TotalRunErrors | Should -Be 1
+        (Import-Csv (Join-Path $runFolder.FullName 'ActionResults.csv'))[0].Outcome | Should -Be OutcomeUnknown
+        $log = Get-Content (Join-Path $runFolder.FullName 'ExecutionLog.txt') -Raw
+        $log | Should -Match 'Event=ActionAttention.*ObjectId=obj1.*Outcome=OutcomeUnknown'
+        $log | Should -Not -Match 'Unhandled error:'
         Assert-MockCalled Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1 -Exactly
     }
 
@@ -406,12 +433,19 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
         Assert-MockCalled Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 0
         $runFolder = Get-ChildItem -Path $script:runOutputPath -Directory | Select-Object -First 1
         $executionLog = Get-Content -LiteralPath (Join-Path $runFolder.FullName 'ExecutionLog.txt') -Raw
-        $executionLog | Should -Match 'Scrapped device removals completed: Autopilot accepted=1, already absent=0, failed=0; Intune removed=1, already absent=0, failed=0; Entra removed=1, already absent=0, failed=0, blocked by Autopilot=0\.'
+        $executionLog | Should -Match 'Actions: Planned=3 Attempted=3 RetryAttempts=0; Removed=2; RemovalSubmitted=1; AlreadyAbsent=0; AlreadyRemoved=0; RemovalFailed=0'
+        $executionLog | Should -Match 'Actions \[Intune\]: Planned=1; Attempted=1; Removed=1'
+        $executionLog | Should -Match 'Actions \[Autopilot\]: Planned=1; Attempted=1; RemovalSubmitted=1'
+        $executionLog | Should -Match 'Actions \[Entra\]: Planned=1; Attempted=1; Removed=1'
+        $executionLog | Should -Not -Match 'Evaluated=0 Candidates=0'
         $runSummary = Get-Content -LiteralPath (Join-Path $runFolder.FullName 'RunSummary.json') -Raw | ConvertFrom-Json
         $runSummary.TotalScrappedAutopilotRemovalSubmitted | Should -Be 1
         $runSummary.TotalScrappedIntuneDevicesRemoved | Should -Be 1
         $runSummary.TotalScrappedEntraDevicesRemoved | Should -Be 1
         $runSummary.TotalScrappedComplete | Should -Be 1
+        $runSummary.TotalPlannedActions | Should -Be 3
+        $runSummary.TotalAttemptedActions | Should -Be 3
+        @(Import-Csv (Join-Path $runFolder.FullName 'ActionResults.csv')).Count | Should -Be 3
         $runSummary.PSObject.Properties.Name | Should -Not -Contain 'DaysInactiveThreshold'
         $runSummary.PSObject.Properties.Name | Should -Not -Contain 'CutoffDateUtc'
         $runSummary.TotalErrors | Should -Be 0
