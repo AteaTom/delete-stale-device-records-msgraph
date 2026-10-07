@@ -37,8 +37,9 @@ No Intune or Autopilot deletion is planned by this workflow.
 Scrapped cleanup shows matched serials separately from serials with actual
 Intune/Autopilot/Entra DELETE targets. Counts of unique objects sum to DELETE
 operations, not physical devices. Required Intune success before Autopilot and
-verified Autopilot absence before Entra are displayed explicitly. These are
-alternatives, not combined workflows: `-ScrappedDevices` bypasses stale cleanup.
+accepted Autopilot DELETE requests before Entra are displayed explicitly.
+These are alternatives, not combined workflows: `-ScrappedDevices` bypasses
+stale cleanup.
 
 See `AllEvaluatedDevices.csv` header for the authoritative list; it matches
 the field list documented in the project specification, including

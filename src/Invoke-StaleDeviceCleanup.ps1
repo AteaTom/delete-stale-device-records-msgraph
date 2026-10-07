@@ -60,10 +60,10 @@
     .PARAMETER ScrappedDevices
     Selects explicit hardware retirement, without any inactivity evaluation.
     Removes safely correlated Intune records, then Windows Autopilot identities,
-    then Entra objects only after verified absence of all related Autopilot
-    identities. Failed prerequisites block dependent targets; independent
-    targets continue. Protection, platform, synchronization and ambiguity
-    checks remain. Audit is still the default; this switch alone never deletes.
+    then Entra objects after all related Autopilot DELETE requests are accepted.
+    Failed prerequisites block dependent targets; independent targets continue.
+    Protection, platform, synchronization and ambiguity checks remain. Audit
+    is still the default; this switch alone never deletes.
 
     .PARAMETER ScrappedDeviceCsvPath
     Optional input override for -ScrappedDevices. Defaults to scrappeddevices.csv

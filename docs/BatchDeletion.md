@@ -29,10 +29,11 @@ Stale cleanup plans only eligible Entra objects without Autopilot. Scrapped
 cleanup plans Intune removal, Windows Autopilot identity removal, then eligible
 Entra removal.
 All required Intune operations for the serial must succeed before Autopilot.
-Entra prerequisites include required Intune removals and verified absence of
-all associated Autopilot identities. Verification runs between the Autopilot
-and Entra phases even without `-VerifyDeletion`. Pending/denied reads block
-dependent Entra targets while independent operations continue. No arbitrary batch
+Entra prerequisites include required Intune removals and accepted Autopilot
+DELETE responses for all associated identities. Read-back does not run between
+the Autopilot and Entra phases. Optional `-VerifyDeletion` runs after all
+planned DELETE operations and records absence separately from API acceptance;
+it does not gate dependent Entra targets. No arbitrary batch
 `dependsOn` graph is constructed and no serial-based `deleteDevices` action
 is used.
 

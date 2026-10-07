@@ -35,9 +35,9 @@ deleting anything.
   (`AutopilotProtected`). They require explicit hardware deregistration.
 - The explicit scrapped-device workflow removes Intune records first, submits
   each unique Autopilot identity through the supported identity DELETE, and
-  removes safely correlated Entra objects only after verified Autopilot absence.
+  removes safely correlated Entra objects once Autopilot accepts each DELETE.
   Failed or declined Intune removal blocks related Autopilot deregistration.
-  Bounded exact-ID read-back gates Entra removal; pending results fail closed.
+  Autopilot read-back is not required before Entra removal.
 - Incomplete discovery (a failed Graph call for an entire data set) blocks
   all deletion for the run.
 - **Intune managed-device records are never deleted** by the activity-based
@@ -92,8 +92,10 @@ Multiple records require corroborating stable relationships to one device.
 
 Only explicit scrapped hardware can be deregistered: remove Intune records
 first, then submit the Autopilot identity DELETE after successful prerequisites.
-Explicit scrapped cleanup then removes safely correlated Entra objects only
-after exact-ID read-back confirms all related Autopilot identities absent.
+Once Graph accepts the Autopilot DELETE (HTTP 204), explicit scrapped cleanup
+continues to remove safely correlated Entra objects without waiting for a
+read-back check. For JSON batch runs, `-VerifyDeletion` remains an optional
+post-operation read-back and does not gate dependent Entra removals.
 This is an intentional hardware-retirement exception to Microsoft's advice
 against routine manual Entra deletion after deregistration:
 [deregistration guidance](https://learn.microsoft.com/autopilot/registration-overview#deregister-a-device). See
@@ -167,7 +169,8 @@ Before confirmation, the workflow-specific summary shows tenant, mode,
 WhatIf and transport. Stale cleanup lists only planned standalone Entra
 deletions; Autopilot-backed devices appear as retained. Scrapped cleanup
 counts serials with actual targets and unique Intune/Autopilot/Entra DELETE
-operations separately, with dependency verification before Entra deletion.
+operations separately, with Intune and accepted Autopilot DELETE requests as
+the prerequisites for Entra deletion.
 Audit and WhatIf clearly indicate that no tenant DELETE requests are sent.
 
 Individual SDK deletions remain the default. `-DeletionTransport JsonBatch`
@@ -246,11 +249,12 @@ It follows Microsoft's deregistration order by removing unique Intune records
 first and then submitting each unique Autopilot identity through the supported
 identity DELETE only if required Intune removals succeeded. A failed or skipped
 prerequisite blocks dependent operations. Accepted Autopilot deletion is
-`RemovalSubmitted`, not proof of disappearance. Exact-ID read-back uses at
-most three attempts with five-second intervals; only observed absence permits
-Entra deletion. Pending/denied verification blocks Entra and produces a
-non-success result, while independent targets continue. This safety gate is
-mandatory in both transports and is separate from optional `-VerifyDeletion`.
+reported as `RemovalSubmitted`; the successful Graph DELETE response is
+sufficient to proceed with corresponding Entra
+deletion. JSON batch `-VerifyDeletion` optionally performs exact-ID read-back
+after all planned DELETE operations; its result is diagnostic and does not
+gate the dependency sequence. Failed/declined Autopilot removal still blocks
+Entra deletion, while independent targets continue.
 The workflow uses the same
 Mode/`-WhatIf`/`-ConfirmDeletion` gating as the rest of the tool and does not
 run the standard stale-device lifecycle in the same execution. Before

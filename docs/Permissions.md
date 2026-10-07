@@ -69,7 +69,7 @@ before use in those environments.
 - The one exception is the explicit `-ScrappedDevices` workflow: for
   serial numbers you provide, it removes the matching Windows Autopilot
   identity, Intune managed device, and safely correlated Entra objects only
-  after verified Autopilot absence. It never acts on
+  after Graph accepts the Autopilot DELETE request. It never acts on
   any serial number not present in that file.
 - iOS and Android devices are never looked up in, or deleted from, Windows
   Autopilot.

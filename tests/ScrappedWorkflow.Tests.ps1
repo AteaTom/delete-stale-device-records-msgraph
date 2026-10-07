@@ -251,7 +251,7 @@ Describe 'Scrapped script outcomes with entirely offline Graph mocks' {
         if ($Scenario -eq 'WhatIf') { $summary.TotalScrappedSimulated | Should -Be 1 }
     }
 
-    It 'blocks Entra and reports partial success when Autopilot <Readback> with <Transport>' -ForEach @(
+    It 'continues to Entra after accepted Autopilot removal with <Readback> read-back and <Transport>' -ForEach @(
         @{ Readback = 'OK'; Transport = 'Individual' }, @{ Readback = 'Forbidden'; Transport = 'Individual' },
         @{ Readback = 'OK'; Transport = 'JsonBatch' }, @{ Readback = 'Forbidden'; Transport = 'JsonBatch' }
     ) {
@@ -263,18 +263,23 @@ Describe 'Scrapped script outcomes with entirely offline Graph mocks' {
         }
         Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -ParameterFilter { $Method -eq 'GET' } -MockWith $responseMock
         & $script:entry @script:invoke -Mode Automatic -ConfirmDeletion
-        Should -Invoke Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
-        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0 -ParameterFilter { $Method -eq 'POST' -and $Body -match '/devices/' }
+        if ($Transport -eq 'Individual') {
+            Should -Invoke Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 1
+        } else {
+            Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
+                $Method -eq 'POST' -and $Body -match '/devices/'
+            }
+        }
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0 -ParameterFilter { $Method -eq 'GET' }
         $run = Get-ChildItem $script:output -Directory | Select-Object -First 1
         $rows = Import-Csv (Join-Path $run.FullName 'ScrappedDeviceResults.csv')
-        ($rows | Where-Object EntraObjectId).EntraRemovalStatus | Should -Be 'BlockedDependency'
-        $rows.CleanupOutcome | Sort-Object -Unique | Should -Be @('Partial')
-        $verification = if ($Readback -eq 'OK') { 'VerificationPending' } else { 'OutcomeUnknown' }
-        ($rows | Where-Object AutopilotIdentityId | Select-Object -First 1).AutopilotVerificationStatus | Should -Be $verification
+        ($rows | Where-Object EntraObjectId).EntraRemovalStatus | Should -Be 'Removed'
+        $rows.CleanupOutcome | Sort-Object -Unique | Should -Be @('Complete')
+        ($rows | Where-Object AutopilotIdentityId | Select-Object -First 1).AutopilotVerificationStatus | Should -Be 'NotRequested'
         $summary = Get-Content (Join-Path $run.FullName 'RunSummary.json') -Raw | ConvertFrom-Json
-        $summary.ExitCode | Should -Be 6
-        $summary.TotalScrappedComplete | Should -Be 0
-        $summary.TotalScrappedEntraDevicesBlockedByAutopilot | Should -Be 1
+        $summary.ExitCode | Should -Be 0
+        $summary.TotalScrappedComplete | Should -Be 1
+        $summary.TotalScrappedEntraDevicesBlockedByAutopilot | Should -Be 0
     }
 
     It 'reports empty input as scrapped without inactivity metadata' {
@@ -328,7 +333,7 @@ Describe 'Scrapped script outcomes with entirely offline Graph mocks' {
             @((New-ScrappedAutopilotFixture), (New-ScrappedAutopilotFixture -Id ap2 -ManagedId intune2))
         }
         & $script:entry @script:invoke -Mode Automatic -ConfirmDeletion -DeletionTransport $Transport
-        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 2 -Exactly -ParameterFilter { $Method -eq 'GET' }
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0 -Exactly -ParameterFilter { $Method -eq 'GET' }
         if ($Transport -eq 'Individual') {
             Should -Invoke Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 2 -Exactly
             Should -Invoke Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 2 -Exactly
@@ -389,7 +394,7 @@ Describe 'Scrapped script outcomes with entirely offline Graph mocks' {
         $run = Get-ChildItem $script:output -Directory | Select-Object -First 1
         $rows = Import-Csv (Join-Path $run.FullName 'ScrappedDeviceResults.csv')
         ($rows | Where-Object InputSerialNumber -eq UNKNOWN).AutopilotVerificationStatus | Should -Be 'NotRequested'
-        ($rows | Where-Object AutopilotIdentityId | Select-Object -First 1).AutopilotVerificationStatus | Should -Be 'VerifiedAbsent'
+        ($rows | Where-Object AutopilotIdentityId | Select-Object -First 1).AutopilotVerificationStatus | Should -Be 'NotRequested'
     }
 
     It 'does not report Complete when optional <Service> verification is <Readback>' -ForEach @(
@@ -407,27 +412,6 @@ Describe 'Scrapped script outcomes with entirely offline Graph mocks' {
         }
         Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -ParameterFilter $filter -MockWith $responseMock
         & $script:entry @script:invoke -Mode Automatic -ConfirmDeletion -DeletionTransport JsonBatch -VerifyDeletion
-        $run = Get-ChildItem $script:output -Directory | Select-Object -First 1
-        $summary = Get-Content (Join-Path $run.FullName 'RunSummary.json') -Raw | ConvertFrom-Json
-        $summary.TotalScrappedComplete | Should -Be 0
-        $summary.("TotalScrapped$Outcome") | Should -Be 1 -Because (Get-Content (Join-Path $run.FullName 'ScrappedDeviceResults.csv') -Raw)
-        $summary.ExitCode | Should -Be 6
-    }
-
-    It 'requires verified absence for already-removed Autopilot-only hardware with <Readback>' -ForEach @(
-        @{ Readback = 'OK'; Outcome = 'Pending' },
-        @{ Readback = 'Forbidden'; Outcome = 'Blocked' }
-    ) {
-        Mock Get-MgDevice -ModuleName StaleDeviceCleanup { @() }
-        Mock Get-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup { @() }
-        Mock Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup { throw 'ZtdDeviceAlreadyDeleted' }
-        $responseMock = if ($Readback -eq 'OK') {
-            { [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::OK) }
-        } else {
-            { [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::Forbidden) }
-        }
-        Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -ParameterFilter { $Method -eq 'GET' } -MockWith $responseMock
-        & $script:entry @script:invoke -Mode Automatic -ConfirmDeletion
         $run = Get-ChildItem $script:output -Directory | Select-Object -First 1
         $summary = Get-Content (Join-Path $run.FullName 'RunSummary.json') -Raw | ConvertFrom-Json
         $summary.TotalScrappedComplete | Should -Be 0

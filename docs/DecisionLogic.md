@@ -111,18 +111,16 @@ After confirmation, the scrapped-device operation follows this order:
 
 1. Remove each unique matched Intune managed-device record once.
 2. Submit every unique Autopilot identity once through the supported identity
-   DELETE endpoint.
-   Failed or declined required Intune removals block Autopilot for the serial.
-3. Treat a successful Autopilot DELETE as submitted, not portal disappearance.
-4. Read back each accepted Autopilot identity by exact ID, at most three
-   attempts with five-second intervals. Only verified absence permits related
-   Entra deletion. Pending or failed verification blocks dependent Entra
-   operations and produces a non-success result. WhatIf simulates this
-   dependency transition without claiming actual absence or making DELETE calls.
-5. Remove every safely correlated eligible Entra target. Intune or Autopilot
+   DELETE endpoint. Failed or declined required Intune removals block
+   Autopilot for the serial.
+3. Treat a successful Autopilot DELETE response as accepted; it is sufficient
+   to proceed without waiting for portal or API read-back visibility.
+4. Remove every safely correlated eligible Entra target. Intune or Autopilot
    prerequisite failure blocks related Entra; independent targets continue.
-6. Optional JsonBatch verification reads exact successful target IDs with
-   bounded retries and records absence separately from API success.
+   WhatIf simulates this dependency transition without making DELETE calls.
+5. Optional JsonBatch verification reads exact successful target IDs after
+   planned deletions and records absence separately from API acceptance. It
+   does not gate dependent Entra removal.
 
 Entra deletion here is an intentional exception for explicit physical
 retirement, not routine cleanup after Autopilot deregistration. Microsoft's

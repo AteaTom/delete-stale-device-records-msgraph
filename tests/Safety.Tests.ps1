@@ -361,7 +361,7 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
         (Get-Content -LiteralPath $statePath -Raw).Trim() | Should -Be '{}'
     }
 
-    It 'executes scrapped-only cleanup with <Transport> across all services after verified absence' -TestCases @(
+    It 'executes scrapped-only cleanup with <Transport> after accepted Autopilot deletion' -TestCases @(
         @{ Transport = 'Individual' }, @{ Transport = 'JsonBatch' }
     ) {
         param($Transport)
@@ -407,10 +407,11 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
             Assert-MockCalled Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 1
             Assert-MockCalled Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 1
             Assert-MockCalled Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $WindowsAutopilotDeviceIdentityId -eq 'ap1' }
-            Assert-MockCalled Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Method -eq 'GET' }
+            Assert-MockCalled Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0 -ParameterFilter { $Method -eq 'GET' }
         } else {
             Assert-MockCalled Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
             Assert-MockCalled Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 3 -Exactly -ParameterFilter { $Method -eq 'POST' }
+            Assert-MockCalled Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0 -ParameterFilter { $Method -eq 'GET' }
             Assert-MockCalled Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 0
             Assert-MockCalled Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 0
         }
