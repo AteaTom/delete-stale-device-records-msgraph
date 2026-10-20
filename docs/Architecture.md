@@ -96,9 +96,11 @@ record has already disappeared from the portal.
    confirmation, unique Intune records are removed first, then each unique
    Autopilot identity is submitted through the identity DELETE endpoint. A
    failed Intune prerequisite blocks related Autopilot deregistration.
-   Accepted Autopilot identities undergo bounded exact-ID read-back before
-   related Entra deletion. Pending/failed dependencies block those Entra
-   targets, while independent targets continue. This branch then exits early
+   A documented Autopilot HTTP 204 permits related Entra deletion as an
+   accepted submission. An unexpected HTTP 200 requires immediate bounded
+   exact-ID read-back; only verified absence permits the dependent Entra
+   deletion. Unresolved dependencies block those Entra targets, while
+   independent targets continue. This branch then exits early
    and never enters the standard stale lifecycle.
 6. The stale branch excludes Autopilot-backed records and removes only
    eligible standalone Entra objects after approval.

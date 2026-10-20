@@ -1037,7 +1037,7 @@ function Export-CleanupReports {
     $manualReview = @($AllEvaluatedDevices | Where-Object Decision -eq 'ManualReview')
     $ambiguous = @($AllEvaluatedDevices | Where-Object MatchStatus -eq 'Ambiguous')
     $errors = @($AllEvaluatedDevices | Where-Object { $_.ErrorMessage })
-    $deleted = @($AllEvaluatedDevices | Where-Object { $_.EntraRemovalStatus -eq 'Removed' -or $_.AutopilotRemovalStatus -in 'Removed', 'AlreadyRemoved' })
+    $deleted = @($AllEvaluatedDevices | Where-Object { $_.EntraRemovalStatus -eq 'Removed' -or $_.AutopilotRemovalStatus -in 'Removed', 'VerifiedAbsent', 'AlreadyRemoved' })
     $onPremisesReviewFields = @(
         'RunId', 'EvaluationTimestampUtc', 'EntraObjectId', 'EntraDeviceId', 'DeviceName',
         'Platform', 'OperatingSystem', 'OperatingSystemVersion', 'EntraAccountEnabled',
@@ -1165,14 +1165,16 @@ function New-RunSummary {
     $toRemove = @($AllEvaluatedDevices | Where-Object { $_.Decision -eq 'Candidate' -and $_.PSObject.Properties['EntraAction'] -and $_.EntraAction -eq 'Remove' })
     $onPremisesSyncReview = @($AllEvaluatedDevices | Where-Object { $_.PSObject.Properties['ReasonCode'] -and $_.ReasonCode -eq 'OnPremisesSyncProtected' })
     $deletedEntra = @($AllEvaluatedDevices | Where-Object EntraRemovalStatus -eq 'Removed')
-    $deletedAutopilot = @($AllEvaluatedDevices | Where-Object AutopilotRemovalStatus -in 'Removed', 'AlreadyRemoved')
+    $deletedAutopilot = @($AllEvaluatedDevices | Where-Object AutopilotRemovalStatus -in 'Removed', 'VerifiedAbsent', 'AlreadyRemoved')
     $submittedAutopilot = @($AllEvaluatedDevices | Where-Object AutopilotRemovalStatus -eq 'RemovalSubmitted')
+    $verifiedAbsentAutopilot = @($AllEvaluatedDevices | Where-Object AutopilotRemovalStatus -eq 'VerifiedAbsent')
     $errors = @($AllEvaluatedDevices | Where-Object { $_.ErrorMessage })
     $scrappedSerials = @($ScrappedDeviceRecords | Where-Object NormalizedSerialNumber | Select-Object -ExpandProperty NormalizedSerialNumber -Unique)
     $scrappedMatchedSerials = @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'Matched' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique)
     $scrappedAmbiguousSerials = @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'Ambiguous' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique)
     $scrappedNotFoundSerials = @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'NotFound' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique)
     $scrappedSubmittedAutopilot = @($ScrappedDeviceRecords | Where-Object { $_.AutopilotRemovalStatus -eq 'RemovalSubmitted' -and $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId -Unique)
+    $scrappedVerifiedAbsentAutopilot = @($ScrappedDeviceRecords | Where-Object { $_.AutopilotRemovalStatus -eq 'VerifiedAbsent' -and $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId -Unique)
     $scrappedAlreadyRemovedAutopilot = @($ScrappedDeviceRecords | Where-Object { $_.AutopilotRemovalStatus -eq 'AlreadyRemoved' -and $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId -Unique)
     $scrappedFailedAutopilot = @($ScrappedDeviceRecords | Where-Object { $_.AutopilotRemovalStatus -eq 'RemovalFailed' -and $_.AutopilotIdentityId } | Select-Object -ExpandProperty AutopilotIdentityId -Unique)
     $scrappedRemovedIntune = @($ScrappedDeviceRecords | Where-Object { $_.IntuneRemovalStatus -eq 'Removed' -and $_.IntuneManagedDeviceId } | Select-Object -ExpandProperty IntuneManagedDeviceId -Unique)
@@ -1203,6 +1205,7 @@ function New-RunSummary {
         AllowOnPremisesSyncedDeletion = $AllowOnPremisesSyncedDeletion
         TotalAutopilotRemoved     = $deletedAutopilot.Count
         TotalAutopilotRemovalSubmitted = $submittedAutopilot.Count
+        TotalAutopilotVerifiedAbsent = $verifiedAbsentAutopilot.Count
         ScrappedWorkflow          = ([bool]$ScrappedDevices -or $ScrappedDeviceRecords.Count -gt 0)
         TotalScrappedSerials      = $scrappedSerials.Count
         TotalScrappedMatchedSerials = $scrappedMatchedSerials.Count
@@ -1211,6 +1214,7 @@ function New-RunSummary {
         TotalScrappedExcludedSerials = @($ScrappedDeviceRecords | Where-Object MatchStatus -eq 'Excluded' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique).Count
         TotalScrappedEntraReview = @($ScrappedDeviceRecords | Where-Object EntraObjectId | Select-Object -ExpandProperty EntraObjectId -Unique).Count
         TotalScrappedAutopilotRemovalSubmitted = $scrappedSubmittedAutopilot.Count
+        TotalScrappedAutopilotVerifiedAbsent = $scrappedVerifiedAbsentAutopilot.Count
         TotalScrappedAutopilotAlreadyRemoved = $scrappedAlreadyRemovedAutopilot.Count
         TotalScrappedAutopilotRemovalFailed = $scrappedFailedAutopilot.Count
         TotalScrappedIntuneDevicesRemoved = $scrappedRemovedIntune.Count
@@ -1246,7 +1250,7 @@ function New-RunSummary {
     $summary.TotalAttemptedActions = @($ActionRecords | Where-Object Attempts -gt 0).Count
     $summary.TotalRetryAttempts = [int](($ActionRecords | ForEach-Object { [Math]::Max(0, $_.Attempts - 1) } | Measure-Object -Sum).Sum)
     $summary.ActionOutcomes = [ordered]@{}
-    foreach ($status in 'Removed', 'RemovalSubmitted', 'AlreadyAbsent', 'AlreadyRemoved', 'RemovalFailed',
+    foreach ($status in 'Removed', 'RemovalSubmitted', 'VerifiedAbsent', 'AlreadyAbsent', 'AlreadyRemoved', 'RemovalFailed',
         'OutcomeUnknown', 'BlockedDependency', 'WhatIf', 'Declined', 'NotAttempted') {
         $summary.ActionOutcomes[$status] = @($ActionRecords | Where-Object Outcome -eq $status).Count
     }
@@ -1718,7 +1722,7 @@ function Set-ScrappedDeviceOutcomes {
                     if (-not $row.($service.Id)) { continue }
                     $status = $row.("$($service.Name)RemovalStatus")
                     $verificationProperty = $row.PSObject.Properties["$($service.Name)VerificationStatus"]
-                    if ($service.Name -eq 'Autopilot' -and $status -in 'RemovalSubmitted', 'AlreadyRemoved') {
+                    if ($service.Name -eq 'Autopilot' -and $status -in 'RemovalSubmitted', 'VerifiedAbsent', 'AlreadyRemoved') {
                         'Removed'
                     } elseif ($verificationProperty -and $verificationProperty.Value -in 'OutcomeUnknown', 'VerificationPending') {
                         $verificationProperty.Value
@@ -1729,10 +1733,10 @@ function Set-ScrappedDeviceOutcomes {
         $outcome = if (@($rows | Where-Object MatchStatus -eq 'LookupFailed').Count) { 'LookupFailed' }
         elseif (@($rows | Where-Object MatchStatus -in 'Ambiguous', 'Excluded').Count) { 'Excluded' }
         elseif (@($rows | Where-Object MatchStatus -eq 'NotFound').Count) { 'NotFound' }
-        elseif ($statuses.Count -and @($statuses | Where-Object { $_ -notin 'Removed', 'AlreadyRemoved', 'AlreadyAbsent' }).Count -eq 0) { 'Complete' }
+        elseif ($statuses.Count -and @($statuses | Where-Object { $_ -notin 'Removed', 'VerifiedAbsent', 'AlreadyRemoved', 'AlreadyAbsent' }).Count -eq 0) { 'Complete' }
         elseif ($statuses.Count -and @($statuses | Where-Object { $_ -ne 'WhatIf' }).Count -eq 0) { 'Simulated' }
         elseif (@($statuses | Where-Object { $_ -in 'RemovalFailed', 'OutcomeUnknown', 'BlockedDependency', 'Declined', 'Skipped' }).Count) {
-            if (@($statuses | Where-Object { $_ -in 'Removed', 'AlreadyRemoved', 'AlreadyAbsent', 'RemovalSubmitted' }).Count) { 'Partial' } else { 'Blocked' }
+            if (@($statuses | Where-Object { $_ -in 'Removed', 'VerifiedAbsent', 'AlreadyRemoved', 'AlreadyAbsent', 'RemovalSubmitted' }).Count) { 'Partial' } else { 'Blocked' }
         } elseif ($statuses -contains 'RemovalSubmitted' -or $statuses -contains 'VerificationPending') { 'Pending' }
         else { 'NotAttempted' }
         foreach ($row in $rows) {
