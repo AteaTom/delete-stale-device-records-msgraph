@@ -433,13 +433,14 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
         Assert-MockCalled Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 0
         $runFolder = Get-ChildItem -Path $script:runOutputPath -Directory | Select-Object -First 1
         $executionLog = Get-Content -LiteralPath (Join-Path $runFolder.FullName 'ExecutionLog.txt') -Raw
-        $executionLog | Should -Match 'Actions: Planned=3 Attempted=3 RetryAttempts=0; Removed=2; RemovalSubmitted=1; AlreadyAbsent=0; AlreadyRemoved=0; RemovalFailed=0'
+        $executionLog | Should -Match 'Actions: Planned=3 Attempted=3 RetryAttempts=0; Removed=2; RemovalSubmitted=1; VerifiedAbsent=0; AlreadyAbsent=0; AlreadyRemoved=0; RemovalFailed=0'
         $executionLog | Should -Match 'Actions \[Intune\]: Planned=1; Attempted=1; Removed=1'
         $executionLog | Should -Match 'Actions \[Autopilot\]: Planned=1; Attempted=1; RemovalSubmitted=1'
         $executionLog | Should -Match 'Actions \[Entra\]: Planned=1; Attempted=1; Removed=1'
         $executionLog | Should -Not -Match 'Evaluated=0 Candidates=0'
         $runSummary = Get-Content -LiteralPath (Join-Path $runFolder.FullName 'RunSummary.json') -Raw | ConvertFrom-Json
         $runSummary.TotalScrappedAutopilotRemovalSubmitted | Should -Be 1
+        $runSummary.TotalScrappedAutopilotVerifiedAbsent | Should -Be 0
         $runSummary.TotalScrappedIntuneDevicesRemoved | Should -Be 1
         $runSummary.TotalScrappedEntraDevicesRemoved | Should -Be 1
         $runSummary.TotalScrappedComplete | Should -Be 1

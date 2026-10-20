@@ -95,8 +95,10 @@ and to `ActionResults.csv` rows. An attempted action has `Attempts > 0`, counted
 once even if retried; `TotalRetryAttempts` counts extra submission attempts.
 Submission intent without a trustworthy response remains `OutcomeUnknown`,
 not success. Audit/WhatIf actions have zero actual submission attempts.
-`Removed` is distinct from `AlreadyAbsent`/`AlreadyRemoved` and
-`RemovalSubmitted`; accepted Autopilot submission does not establish absence.
+`Removed` is distinct from `AlreadyAbsent`/`AlreadyRemoved`,
+`RemovalSubmitted` and `VerifiedAbsent`; accepted Autopilot submission does
+not establish absence. `VerifiedAbsent` means the Autopilot DELETE returned
+an unexpected HTTP 200 and an immediate exact-ID read-back confirmed 404.
 Verification uncertainty remains separate from the DELETE outcome.
 `TotalRunErrors` counts errors reaching the run-level catch, including failures
 before any device can be evaluated; it can overlap device/serial errors and
@@ -171,7 +173,8 @@ idempotent completion, not deletion by this run), `RemovalFailed`,
 `NotAttempted`. `RunSummary.json` includes planned and completed removal
 counts, and `ExecutionLog.txt` records the same counts at planning and
 completion. `RunSummary.json` also includes
-`TotalAutopilotRemovalSubmitted` separately from `TotalAutopilotRemoved`.
+`TotalAutopilotRemovalSubmitted` and `TotalAutopilotVerifiedAbsent` separately
+from `TotalAutopilotRemoved`.
 It also records `TotalOnPremisesSyncedReview` and whether the explicit
 `AllowOnPremisesSyncedDeletion` override was enabled.
 `TotalEntraDevicesAlreadyAbsent` counts batch idempotent completion separately
@@ -195,10 +198,11 @@ does not inspect or modify source Active Directory.
 `NormalizedSerialNumber`, `MatchStatus` (`Matched`/`Ambiguous`/`NotFound`/`Excluded`/`LookupFailed`),
 `AmbiguityReason`, `AutopilotIdentityId`, `AutopilotEnrollmentState`,
 `IntuneManagedDeviceId`, `IntuneDeviceName`, `EntraObjectId`,
-`EntraDeviceId`, `EntraDeviceName`, `CorrelationMethod`, and per-target `AutopilotRemovalStatus`,
-`IntuneRemovalStatus`, `EntraRemovalStatus`. Scrapped-device Autopilot states
-include `RemovalSubmitted`, `AlreadyRemoved`, `RemovalFailed`, `Declined`,
-`WhatIf`, and `NotApplicable`.
+`EntraDeviceId`, `EntraDeviceName`, `CorrelationMethod`, and per-target
+`AutopilotRemovalStatus`, `IntuneRemovalStatus`, `EntraRemovalStatus`.
+Scrapped-device Autopilot states include `RemovalSubmitted`, `VerifiedAbsent`,
+`AlreadyRemoved`, `RemovalFailed`, `OutcomeUnknown`, `BlockedDependency`,
+`Declined`, `WhatIf`, `NotApplicable` and `NotAttempted`.
 Intune states include `Removed`, `AlreadyRemoved`, `RemovalFailed`, `OutcomeUnknown`, `Declined`,
 `WhatIf`, `Skipped`, `NotApplicable`, and `NotAttempted`. Autopilot also uses
 `BlockedDependency` when required Intune removal did not succeed.
@@ -221,14 +225,18 @@ When optional final verification is requested, continued visibility produces
 `Complete`, even when DELETE was accepted. Confirmed unresolved cleanup exits
 nonzero; Audit and WhatIf never claim real cleanup.
 
-`RemovalSubmitted` means the supported Autopilot identity DELETE succeeded.
-It confirms submission, not immediate disappearance from the Autopilot portal;
-the service completes that work asynchronously.
+`RemovalSubmitted` means the supported Autopilot identity DELETE returned the
+documented HTTP 204. It confirms submission, not immediate disappearance from
+the Autopilot portal; the service completes that work asynchronously.
+`VerifiedAbsent` means an unexpected HTTP 200 was followed by an immediate
+exact-ID GET returning 404. Only this verified absence permits dependent Entra
+removal for that response. It is counted separately in
+`TotalScrappedAutopilotVerifiedAbsent`.
 
 For scrapped-device runs, the completion log and `RunSummary.json` count
-Autopilot submissions, already-absent and failed objects, Intune removals,
-and Entra removed, already-absent, failed and blocked objects by unique nonempty
-object ID, not by expanded CSV row.
+Autopilot submissions, read-back-confirmed absent, already-absent and failed
+objects, Intune removals, and Entra removed, already-absent, failed and blocked
+objects by unique nonempty object ID, not by expanded CSV row.
 The summary also includes unique input, matched,
 ambiguous, not-found, and error serial counts. This prevents one serial
 expanded across multiple object rows from inflating completion totals.

@@ -68,17 +68,26 @@ not automatic replay.
 
 Batching is not atomic. Successfully removed records are not rolled back.
 Recognized HTTP 204 is API success; Autopilot uses `RemovalSubmitted` rather
-than claiming immediate disappearance. Entra 404 is `AlreadyAbsent`, not
-“deleted by this run.” Intune/Autopilot 404 is not silently accepted.
+than claiming immediate disappearance. An Autopilot HTTP 200 is not accepted
+as DELETE success: the executor immediately reads the exact identity ID.
+`VerifiedAbsent` is recorded, and dependent Entra removal may proceed, only
+when that read returns 404. If the identity remains visible or read-back
+fails, its outcome remains unresolved and dependent Entra removal is blocked.
+The executor never retries that DELETE automatically. Entra 404 is
+`AlreadyAbsent`, not “deleted by this run.” Intune/Autopilot 404 is not
+silently accepted.
 
 Only 429/503/504 subrequests enter the bounded retry queue (default five
 attempts and 300 seconds of elapsed/backoff budget per chunk). Honor
 `Retry-After`, including HTTP-date values, with exponential backoff and jitter
 as needed. A permanent failure is logged and is not retried.
 The elapsed budget is rechecked after backoff before another envelope is sent.
-Authorization failure, unexpected/missing/duplicate response identity or
-malformed response stops further execution. An envelope failure is
-`OutcomeUnknown`, never automatic success.
+Authorization failure or unexpected/missing/duplicate response identity or
+malformed response stops further execution, with authorization and response
+integrity errors reported separately. An envelope failure is `OutcomeUnknown`,
+never automatic success. For a valid Autopilot HTTP 200 response, unresolved
+read-back is retained as `OutcomeUnknown` and blocks only dependent Entra
+operations; unrelated operations can continue.
 
 The executor temporarily disables SDK envelope retries using
 [`Set-MgRequestContext -MaxRetry 0`](https://learn.microsoft.com/powershell/module/microsoft.graph.authentication/set-mgrequestcontext?view=graph-powershell-1.0)

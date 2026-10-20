@@ -69,6 +69,13 @@ Entra uses `BlockedDependency` if any required operation or verification fails.
 Autopilot record; it is not a completed cleanup. Independent targets continue.
 Preserve reports and reconcile exact IDs read-only before deciding on a new run.
 
+If an Autopilot DELETE subrequest returns HTTP 200 instead of the documented
+204, the executor does not assume success or replay the DELETE. It immediately
+checks that exact Autopilot identity: `VerifiedAbsent` means the read-back
+returned 404 and the Entra dependency may continue; a visible identity or
+failed read-back leaves the outcome unresolved and blocks dependent Entra
+deletion. Review the journal and exact-ID results read-only before any new run.
+
 ## RunSummary planned and completed removal counts differ
 
 The two Entra counts report different stages of the run:

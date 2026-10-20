@@ -315,7 +315,7 @@ function Invoke-DeviceDeletionPlan {
                 $blocked = @($operation.Dependencies | Where-Object {
                     if ($WhatIfPreference -and $results[$_].Status -eq 'WhatIf') { $false }
                     elseif ($byId[$_].Resource -eq 'Autopilot') {
-                        $results[$_].Status -notin 'RemovalSubmitted', 'AlreadyRemoved', 'AlreadyAbsent'
+                        $results[$_].Status -notin 'RemovalSubmitted', 'VerifiedAbsent', 'AlreadyRemoved', 'AlreadyAbsent'
                     } else { $results[$_].Status -notin 'Removed', 'AlreadyRemoved', 'AlreadyAbsent' }
                 }).Count -gt 0
                 if ($blocked) {
@@ -381,6 +381,18 @@ function Invoke-DeviceDeletionPlan {
                     $parsed = @(ConvertFrom-DeviceDeletionBatchResponse -Response $response -Operations $retry)
                     foreach ($result in $parsed) {
                         $result.Attempts = $results[$result.Id].Attempts
+                        if ($result.Resource -eq 'Autopilot' -and $result.HttpStatus -eq 200 -and
+                            $result.Status -eq 'OutcomeUnknown') {
+                            $verification = Test-DeviceDeletionOutcome -Operation $byId[$result.Id] `
+                                -TenantId $snapshot.TenantId -LogPath $LogPath
+                            $result.VerificationStatus = $verification.Status
+                            if ($verification.Status -eq 'VerifiedAbsent') {
+                                $result.Status = 'VerifiedAbsent'
+                                $result.ErrorMessage = 'DELETE returned HTTP 200; exact-ID read-back confirmed absence.'
+                            } else {
+                                $result.ErrorMessage = "Autopilot DELETE returned unexpected HTTP 200; exact-ID read-back was $($verification.Status): $($verification.ErrorMessage) Dependent Entra removal is blocked."
+                            }
+                        }
                         $results[$result.Id] = $result
                         Write-CleanupLog -Message "Batch operation '$($result.Id)': $($result.Status), HTTP $($result.HttpStatus). $($result.ErrorMessage)" -Level VERBOSE -LogPath $LogPath
                     }
@@ -388,8 +400,13 @@ function Invoke-DeviceDeletionPlan {
                     if ($restoreError) {
                         throw "SDK retry restoration failed: $restoreError Received batch outcomes were journaled; remaining execution stopped."
                     }
-                    if (@($parsed | Where-Object { $_.HttpStatus -in 401, 403 -or $_.Status -eq 'OutcomeUnknown' }).Count -gt 0) {
-                        throw 'Batch authorization or response integrity failure; remaining execution stopped.'
+                    if (@($parsed | Where-Object { $_.HttpStatus -in 401, 403 }).Count -gt 0) {
+                        throw 'Batch authorization failure; remaining execution stopped.'
+                    }
+                    if (@($parsed | Where-Object {
+                        $_.Status -eq 'OutcomeUnknown' -and $_.VerificationStatus -eq 'NotRequested'
+                    }).Count -gt 0) {
+                        throw 'Batch response integrity failure; remaining execution stopped.'
                     }
                     $retry = @($retry | Where-Object { $results[$_.Id].Status -eq 'RetryPending' })
                     if ($retry.Count -gt 0) {

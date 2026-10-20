@@ -461,6 +461,85 @@ Describe 'Guarded JSON batch deletion' {
         Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 3 -Exactly -ParameterFilter { $Method -eq 'GET' }
     }
 
+    It 'requires exact-ID Autopilot absence verification before allowing Entra after HTTP 200' {
+        $script:invoke.Plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records @(New-ScrappedBatchRecord)
+        $script:invoke.ApprovalHash = $script:invoke.Plan.Hash
+        Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -ParameterFilter { $Method -eq 'POST' } {
+            $requests = @((ConvertFrom-Json $Body).requests)
+            [PSCustomObject]@{
+                responses = @($requests | ForEach-Object {
+                    [PSCustomObject]@{ id = $_.id; status = $(if ($_.id -eq 'autopilot-ap1') { 200 } else { 204 }) }
+                })
+            }
+        }
+
+        $results = @(Invoke-DeviceDeletionPlan @script:invoke)
+
+        ($results | Where-Object Resource -eq 'Autopilot').Status | Should -Be 'VerifiedAbsent'
+        ($results | Where-Object Resource -eq 'Autopilot').VerificationStatus | Should -Be 'VerifiedAbsent'
+        ($results | Where-Object Resource -eq 'Entra').Status | Should -Be 'Removed'
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1 -Exactly -ParameterFilter {
+            $Method -eq 'GET' -and $Uri -ceq '/v1.0/deviceManagement/windowsAutopilotDeviceIdentities/ap1'
+        }
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 3 -Exactly -ParameterFilter { $Method -eq 'POST' }
+
+        $records = @(New-ScrappedBatchRecord)
+        Set-DeviceDeletionResults -Workflow Scrapped -Records $records -Results $results
+        Set-ScrappedDeviceOutcomes -Records $records
+        $records[0].CleanupOutcome | Should -Be 'Complete'
+    }
+
+    It 'blocks dependent Entra removal when Autopilot HTTP 200 read-back still finds the identity' {
+        $script:invoke.Plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records @(New-ScrappedBatchRecord)
+        $script:invoke.ApprovalHash = $script:invoke.Plan.Hash
+        Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -ParameterFilter { $Method -eq 'POST' } {
+            $requests = @((ConvertFrom-Json $Body).requests)
+            [PSCustomObject]@{
+                responses = @($requests | ForEach-Object {
+                    [PSCustomObject]@{ id = $_.id; status = $(if ($_.id -eq 'autopilot-ap1') { 200 } else { 204 }) }
+                })
+            }
+        }
+        Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -ParameterFilter { $Method -eq 'GET' } {
+            [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::OK)
+        }
+
+        $results = @(Invoke-DeviceDeletionPlan @script:invoke)
+
+        ($results | Where-Object Resource -eq 'Autopilot').Status | Should -Be 'OutcomeUnknown'
+        ($results | Where-Object Resource -eq 'Autopilot').VerificationStatus | Should -Be 'VerificationPending'
+        ($results | Where-Object Resource -eq 'Entra').Status | Should -Be 'BlockedDependency'
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 3 -Exactly -ParameterFilter { $Method -eq 'GET' }
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 2 -Exactly -ParameterFilter { $Method -eq 'POST' }
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0 -ParameterFilter {
+            $Method -eq 'POST' -and $Body -match 'entra-entra1'
+        }
+    }
+
+    It 'blocks dependent Entra removal when Autopilot HTTP 200 cannot be verified' {
+        $script:invoke.Plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records @(New-ScrappedBatchRecord)
+        $script:invoke.ApprovalHash = $script:invoke.Plan.Hash
+        Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -ParameterFilter { $Method -eq 'POST' } {
+            $requests = @((ConvertFrom-Json $Body).requests)
+            [PSCustomObject]@{
+                responses = @($requests | ForEach-Object {
+                    [PSCustomObject]@{ id = $_.id; status = $(if ($_.id -eq 'autopilot-ap1') { 200 } else { 204 }) }
+                })
+            }
+        }
+        Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -ParameterFilter { $Method -eq 'GET' } {
+            [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::Forbidden)
+        }
+
+        $results = @(Invoke-DeviceDeletionPlan @script:invoke)
+
+        ($results | Where-Object Resource -eq 'Autopilot').Status | Should -Be 'OutcomeUnknown'
+        ($results | Where-Object Resource -eq 'Autopilot').VerificationStatus | Should -Be 'OutcomeUnknown'
+        ($results | Where-Object Resource -eq 'Entra').Status | Should -Be 'BlockedDependency'
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1 -Exactly -ParameterFilter { $Method -eq 'GET' }
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 2 -Exactly -ParameterFilter { $Method -eq 'POST' }
+    }
+
     It 'isolates a failed Intune prerequisite from an unrelated successful device' {
         $records = @(
             (New-ScrappedBatchRecord),
