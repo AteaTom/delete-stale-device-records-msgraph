@@ -109,11 +109,20 @@ authorization/safety gates, retry-round warnings, terminal operation failures,
 verification uncertainty and the completion summary. Each failed/unknown/blocked
 operation has a final `Event=ActionAttention` warning with run, resource,
 object ID, outcome, attempts, HTTP status and reason. A failed retry budget is
-visible even when no final Graph response exists. Successful individual results
-are in the action CSV and journal, not repeated in the normal log.
+visible even when no final Graph response exists.
 
-Discovery starts, successful scope lists, protected-input paths and individual
-batch responses use `-Verbose`; DEBUG uses the debug stream. Neither diagnostic
+During deletion, `ExecutionLog.txt` is appended live so it can be followed with
+`Get-Content -Wait`: `Event=DeletionStarted`, `Event=PhaseStarted` per
+resource, `Event=BatchSubmitting` before each Graph batch, one
+`Event=ActionResult` line per device operation as soon as its outcome is known
+(with `Progress=n/total`, resource, object ID, device name/serial when known,
+outcome, attempts and HTTP status), and `Event=DeletionPhasesCompleted`.
+Successful outcomes use `SUCCESS`, failed/unknown/blocked outcomes use
+`WARNING`, and `-WhatIf` simulations log `Outcome=WhatIf` at `INFO`. The log is
+also written during `-WhatIf` runs; no tenant change occurs.
+
+Discovery starts, successful scope lists and protected-input paths use
+`-Verbose`; DEBUG uses the debug stream. Neither diagnostic
 level is appended to `ExecutionLog.txt`. Preserve diagnostic streams using your
 PowerShell wrapper when needed; the journal still retains submission and retry
 evidence. Graph response detail is restricted to error code/message, not raw

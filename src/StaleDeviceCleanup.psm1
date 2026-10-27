@@ -49,7 +49,8 @@ function Write-CleanupLog {
     $line = "[$timestamp] [$Level] $Message"
 
     try {
-        Add-Content -LiteralPath $LogPath -Value $line -Encoding utf8 -ErrorAction Stop
+        # Local audit trail must be written during -WhatIf simulations as well.
+        Add-Content -LiteralPath $LogPath -Value $line -Encoding utf8 -ErrorAction Stop -WhatIf:$false
     } catch {
         Write-Warning "Failed to write to log file '$LogPath': $($_.Exception.Message)"
     }
@@ -1878,6 +1879,7 @@ Export-ModuleMember -Function @(
     'Initialize-ProjectExecution',
     'Complete-ProjectExecution',
     'New-DeviceDeletionPlan',
+    'Get-DeviceDeletionLogLabel',
     'Invoke-DeviceDeletionPlan',
     'Set-DeviceDeletionResults',
     'Test-DeviceDeletionOutcome',

@@ -91,6 +91,46 @@ function New-DeviceDeletionPlan {
     return $plan
 }
 
+function Get-DeviceDeletionLogLabel {
+    <#
+        .SYNOPSIS
+        Builds operation-ID to device-label lookups used only for human-readable
+        execution-log progress lines. Labels never influence approval or execution.
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Records)
+
+    $labels = @{}
+    foreach ($record in $Records) {
+        if (-not $record) { continue }
+        $name = $null
+        foreach ($property in 'DeviceName', 'EntraDeviceName', 'IntuneDeviceName') {
+            if ($record.PSObject.Properties[$property] -and $record.$property) { $name = [string]$record.$property; break }
+        }
+        $serial = $null
+        foreach ($property in 'SerialNumber', 'InputSerialNumber', 'NormalizedSerialNumber') {
+            if ($record.PSObject.Properties[$property] -and $record.$property) { $serial = [string]$record.$property; break }
+        }
+        $parts = @()
+        if ($name) { $parts += "DeviceName=$name" }
+        if ($serial) { $parts += "Serial=$serial" }
+        if (-not $parts) { continue }
+        $label = $parts -join ' '
+        foreach ($target in @(
+            @{ Resource = 'Intune'; Field = 'IntuneManagedDeviceId' },
+            @{ Resource = 'Autopilot'; Field = 'AutopilotIdentityId' },
+            @{ Resource = 'Entra'; Field = 'EntraObjectId' }
+        )) {
+            if ($record.PSObject.Properties[$target.Field] -and $record.($target.Field)) {
+                $key = "$($target.Resource)-$($record.($target.Field))".ToLowerInvariant()
+                if (-not $labels.ContainsKey($key)) { $labels[$key] = $label }
+            }
+        }
+    }
+    return $labels
+}
+
 function Get-DeviceOperationUri {
     [CmdletBinding()]
     [OutputType([string])]
@@ -234,7 +274,9 @@ function Invoke-DeviceDeletionPlan {
         [ValidateRange(1, 1440)][int]$MaxPlanAgeMinutes = 30,
         [switch]$VerifyDeletion,
         [Parameter(Mandatory)][string]$JournalPath,
-        [Parameter(Mandatory)][string]$LogPath
+        [Parameter(Mandatory)][string]$LogPath,
+        # Log-only labels keyed by operation ID; not part of the approved plan.
+        [hashtable]$OperationLabels = @{}
     )
 
     # Deep-copy before approval validation; later caller mutation cannot expand this execution.
@@ -308,8 +350,26 @@ function Invoke-DeviceDeletionPlan {
         } | ConvertTo-Json -Depth 20 -Compress | Add-Content -LiteralPath $JournalPath -Encoding utf8 -ErrorAction Stop -WhatIf:$false
     }
     & $saveJournal 'Approved'
+    $totalOperations = $operations.Count
+    $finishedOperations = 0
+    $actionLabels = if ($OperationLabels) { $OperationLabels } else { @{} }
+    $writeActionLog = {
+        param([PSCustomObject]$Result)
+        $label = if ($actionLabels.ContainsKey($Result.Id)) { " $($actionLabels[$Result.Id])" } else { '' }
+        $level = if ($Result.Status -in 'Removed', 'RemovalSubmitted', 'VerifiedAbsent', 'AlreadyAbsent', 'AlreadyRemoved') { 'SUCCESS' }
+        elseif ($Result.Status -in 'WhatIf', 'Declined', 'RetryPending') { 'INFO' }
+        else { 'WARNING' }
+        $message = "Event=ActionResult Progress=$finishedOperations/$totalOperations Resource=$($Result.Resource) ObjectId=$($Result.ObjectId)$label Outcome=$($Result.Status) Attempts=$($Result.Attempts) HTTP=$($Result.HttpStatus)"
+        if ($Result.ErrorMessage) { $message += " Reason=$($Result.ErrorMessage)" }
+        Write-CleanupLog -Message $message -Level $level -LogPath $LogPath
+    }
+    Write-CleanupLog -Message "Event=DeletionStarted RunId=$($snapshot.RunId) Tenant=$($snapshot.TenantId) Operations=$totalOperations BatchSize=$BatchSize WhatIf=$([bool]$WhatIfPreference)" -Level INFO -LogPath $LogPath
     try {
         foreach ($phase in 'Intune', 'Autopilot', 'Entra') {
+            $phaseCount = @($operations | Where-Object Resource -eq $phase).Count
+            if ($phaseCount -gt 0) {
+                Write-CleanupLog -Message "Event=PhaseStarted Resource=$phase Operations=$phaseCount" -Level INFO -LogPath $LogPath
+            }
             $pending = [System.Collections.Generic.List[object]]::new()
             foreach ($operation in @($operations | Where-Object Resource -eq $phase)) {
                 $blocked = @($operation.Dependencies | Where-Object {
@@ -321,10 +381,14 @@ function Invoke-DeviceDeletionPlan {
                 if ($blocked) {
                     $results[$operation.Id].Status = 'BlockedDependency'
                     $results[$operation.Id].ErrorMessage = 'Required removal was not accepted.'
+                    $finishedOperations++
+                    & $writeActionLog $results[$operation.Id]
                 } elseif ($PSCmdlet.ShouldProcess("Tenant $($snapshot.TenantId): $phase/$($operation.ObjectId)", 'Delete approved device record')) {
                     $pending.Add($operation)
                 } else {
                     $results[$operation.Id].Status = if ($WhatIfPreference) { 'WhatIf' } else { 'Declined' }
+                    $finishedOperations++
+                    & $writeActionLog $results[$operation.Id]
                 }
             }
             while ($pending.Count -gt 0) {
@@ -337,6 +401,8 @@ function Invoke-DeviceDeletionPlan {
                         foreach ($operation in $retry) {
                             $results[$operation.Id].Status = 'RemovalFailed'
                             $results[$operation.Id].ErrorMessage = 'Transient retry budget exhausted.'
+                            $finishedOperations++
+                            & $writeActionLog $results[$operation.Id]
                         }
                         break
                     }
@@ -349,6 +415,8 @@ function Invoke-DeviceDeletionPlan {
                         $results[$operation.Id].Attempts++
                     }
                     & $saveJournal 'Submitting' $retry
+                    $attemptNumber = ($retry | ForEach-Object { $results[$_.Id].Attempts } | Measure-Object -Maximum).Maximum
+                    Write-CleanupLog -Message "Event=BatchSubmitting Resource=$phase Targets=$($retry.Count) Attempt=$attemptNumber Progress=$finishedOperations/$totalOperations" -Level INFO -LogPath $LogPath
                     $requests = @($retry | ForEach-Object {
                         @{ id = $_.Id; method = 'DELETE'; url = Get-DeviceOperationUri -Operation $_ }
                     })
@@ -394,7 +462,8 @@ function Invoke-DeviceDeletionPlan {
                             }
                         }
                         $results[$result.Id] = $result
-                        Write-CleanupLog -Message "Batch operation '$($result.Id)': $($result.Status), HTTP $($result.HttpStatus). $($result.ErrorMessage)" -Level VERBOSE -LogPath $LogPath
+                        if ($result.Status -ne 'RetryPending') { $finishedOperations++ }
+                        & $writeActionLog $result
                     }
                     & $saveJournal 'Response'
                     if ($restoreError) {
@@ -418,6 +487,8 @@ function Invoke-DeviceDeletionPlan {
                             foreach ($operation in $retry) {
                                 $results[$operation.Id].Status = 'RemovalFailed'
                                 $results[$operation.Id].ErrorMessage = 'Transient retry budget exhausted.'
+                                $finishedOperations++
+                                & $writeActionLog $results[$operation.Id]
                             }
                             $retry = @()
                         } else {
@@ -430,6 +501,7 @@ function Invoke-DeviceDeletionPlan {
             }
             & $saveJournal 'PhaseCompleted'
         }
+        Write-CleanupLog -Message "Event=DeletionPhasesCompleted Processed=$finishedOperations/$totalOperations" -Level INFO -LogPath $LogPath
         if ($VerifyDeletion -and -not $WhatIfPreference) {
             foreach ($operation in $operations) {
                 $result = $results[$operation.Id]

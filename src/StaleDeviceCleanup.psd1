@@ -40,6 +40,7 @@
         'Initialize-ProjectExecution',
         'Complete-ProjectExecution',
         'New-DeviceDeletionPlan',
+        'Get-DeviceDeletionLogLabel',
         'Invoke-DeviceDeletionPlan',
         'Set-DeviceDeletionResults',
         'Test-DeviceDeletionOutcome',

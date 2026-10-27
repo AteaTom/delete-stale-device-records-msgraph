@@ -420,6 +420,67 @@ Describe 'Guarded JSON batch deletion' {
         Invoke-DeviceDeletionPlan @script:invoke | Out-Null
     }
 
+    It 'writes each device outcome to the execution log while deletion progresses' {
+        $records = New-BatchTestRecords -Count 3
+        $records[1] | Add-Member -NotePropertyName DeviceName -NotePropertyValue 'PC-0001'
+        $script:invoke.Plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Stale -Records $records
+        $script:invoke.ApprovalHash = $script:invoke.Plan.Hash
+        $script:invoke.BatchSize = 2
+        $script:invoke.OperationLabels = Get-DeviceDeletionLogLabel -Records $records
+        $script:observedLog = @()
+        Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup {
+            $script:observedLog += , @(Get-Content $script:logPath)
+            $requests = @((ConvertFrom-Json $Body).requests)
+            [PSCustomObject]@{ responses = @($requests | ForEach-Object { [PSCustomObject]@{ id = $_.id; status = 204 } }) }
+        }
+
+        Invoke-DeviceDeletionPlan @script:invoke | Out-Null
+
+        $log = Get-Content $script:logPath -Raw
+        $log | Should -Match '\[INFO\] Event=DeletionStarted RunId=run1 Tenant=tenant1 Operations=3'
+        $log | Should -Match '\[INFO\] Event=PhaseStarted Resource=Entra Operations=3'
+        ([regex]::Matches($log, '\[SUCCESS\] Event=ActionResult .*Outcome=Removed')).Count | Should -Be 3
+        $log | Should -Match 'Progress=2/3 Resource=Entra ObjectId=obj1 DeviceName=PC-0001 Outcome=Removed'
+        $log | Should -Match 'Progress=3/3 Resource=Entra ObjectId=obj2 Outcome=Removed'
+        $log | Should -Match 'Event=DeletionPhasesCompleted Processed=3/3'
+        # The second batch is submitted only after the first batch's per-device lines are on disk.
+        ($script:observedLog[1] -join "`n") | Should -Match 'ObjectId=obj0 Outcome=Removed'
+        ($script:observedLog[1] -join "`n") | Should -Match 'Event=BatchSubmitting Resource=Entra Targets=1 Attempt=1 Progress=2/3'
+    }
+
+    It 'logs simulated per-device outcomes under WhatIf without destructive calls' {
+        Invoke-DeviceDeletionPlan @script:invoke -WhatIf | Out-Null
+        Get-Content $script:logPath -Raw | Should -Match '\[INFO\] Event=ActionResult Progress=1/1 Resource=Entra ObjectId=obj0 Outcome=WhatIf'
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0
+    }
+
+    It 'logs blocked dependent devices as warnings with device labels' {
+        $record = New-ScrappedBatchRecord
+        $record | Add-Member -NotePropertyName EntraDeviceName -NotePropertyValue 'LAPTOP-9'
+        $record | Add-Member -NotePropertyName InputSerialNumber -NotePropertyValue 'SERIAL1'
+        $script:invoke.Plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records @($record)
+        $script:invoke.ApprovalHash = $script:invoke.Plan.Hash
+        $script:invoke.OperationLabels = Get-DeviceDeletionLogLabel -Records @($record)
+        Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup {
+            [PSCustomObject]@{ responses = @([PSCustomObject]@{ id = 'intune-intune1'; status = 400 }) }
+        }
+        Invoke-DeviceDeletionPlan @script:invoke | Out-Null
+        $log = Get-Content $script:logPath -Raw
+        $log | Should -Match '\[WARNING\] Event=ActionResult Progress=1/3 Resource=Intune ObjectId=intune1 DeviceName=LAPTOP-9 Serial=SERIAL1 Outcome=RemovalFailed'
+        $log | Should -Match '\[WARNING\] Event=ActionResult Progress=3/3 Resource=Entra ObjectId=entra1 DeviceName=LAPTOP-9 Serial=SERIAL1 Outcome=BlockedDependency'
+    }
+
+    It 'does not change the approved plan hash when log labels are supplied' {
+        $records = New-BatchTestRecords
+        $records[0] | Add-Member -NotePropertyName DeviceName -NotePropertyValue 'PC-HASH'
+        $labels = Get-DeviceDeletionLogLabel -Records $records
+        $labels['entra-obj0'] | Should -Be 'DeviceName=PC-HASH'
+        (InModuleScope StaleDeviceCleanup -Parameters @{ Plan = $script:plan } { param($Plan) Get-DeviceDeletionPlanHash -Plan $Plan }) |
+            Should -BeExactly $script:plan.Hash
+        $script:invoke.OperationLabels = $labels
+        (Invoke-DeviceDeletionPlan @script:invoke).Status | Should -Be 'Removed'
+    }
+
     It 'blocks Autopilot and Entra after a failed Intune prerequisite' {
         $script:invoke.Plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records @(New-ScrappedBatchRecord)
         $script:invoke.ApprovalHash = $script:invoke.Plan.Hash
