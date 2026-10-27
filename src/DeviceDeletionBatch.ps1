@@ -26,6 +26,15 @@ function New-DeviceDeletionPlan {
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Records
     )
 
+    $matchedBySerial = @{}
+    if ($Workflow -eq 'Scrapped') {
+        foreach ($record in $Records) {
+            if ($record.MatchStatus -ne 'Matched') { continue }
+            $serial = [string]$record.NormalizedSerialNumber
+            if (-not $matchedBySerial.ContainsKey($serial)) { $matchedBySerial[$serial] = [System.Collections.Generic.List[object]]::new() }
+            $matchedBySerial[$serial].Add($record)
+        }
+    }
     $operations = @{}
     foreach ($record in $Records) {
         $targets = @()
@@ -58,17 +67,14 @@ function New-DeviceDeletionPlan {
                 }
             }
             if ($target.Resource -eq 'Autopilot') {
-                $intuneIds = @($Records | Where-Object {
-                    $_.MatchStatus -eq 'Matched' -and $_.NormalizedSerialNumber -eq $record.NormalizedSerialNumber -and $_.IntuneManagedDeviceId
-                } | Select-Object -ExpandProperty IntuneManagedDeviceId -Unique)
+                $intuneIds = @($matchedBySerial[[string]$record.NormalizedSerialNumber] |
+                    Where-Object IntuneManagedDeviceId | Select-Object -ExpandProperty IntuneManagedDeviceId -Unique)
                 $operations[$key].Dependencies = @(
                     @($operations[$key].Dependencies) + @($intuneIds | ForEach-Object { "intune-$_".ToLowerInvariant() }) |
                         Sort-Object -Unique
                 )
             } elseif ($Workflow -eq 'Scrapped' -and $target.Resource -eq 'Entra') {
-                $related = @($Records | Where-Object {
-                    $_.MatchStatus -eq 'Matched' -and $_.NormalizedSerialNumber -eq $record.NormalizedSerialNumber
-                })
+                $related = @($matchedBySerial[[string]$record.NormalizedSerialNumber])
                 $prerequisites = @(
                     foreach ($row in $related) {
                         if ($row.IntuneManagedDeviceId) { "intune-$($row.IntuneManagedDeviceId)".ToLowerInvariant() }

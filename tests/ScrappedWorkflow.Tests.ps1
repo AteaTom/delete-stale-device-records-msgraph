@@ -136,6 +136,63 @@ Describe 'Scrapped stable-identifier correlation boundaries' {
         @($records | Where-Object MatchStatus -ne 'Matched').Count | Should -Be 0
     }
 
+    It 'retains every conflicting record in the <Link> index, case-insensitively' -ForEach @(
+        @{ Link = 'IntuneDeviceReference' }, @{ Link = 'AutopilotDeviceReference' },
+        @{ Link = 'IntuneObjectId' }, @{ Link = 'AutopilotManagedReference' }
+    ) {
+        switch ($Link) {
+            IntuneDeviceReference {
+                $script:resolve.IntuneDevices += New-ScrappedIntuneFixture -Id other -DeviceId DEVICE1 -Serial DIFFERENT
+            }
+            AutopilotDeviceReference {
+                $script:resolve.AutopilotDevices += New-ScrappedAutopilotFixture -Id other -DeviceId DEVICE1 -ManagedId other -Serial DIFFERENT
+            }
+            IntuneObjectId {
+                $script:resolve.IntuneDevices += New-ScrappedIntuneFixture -Id INTUNE1 -DeviceId unrelated -Serial DIFFERENT
+                $script:resolve.IntuneDevices += New-ScrappedIntuneFixture
+            }
+            AutopilotManagedReference {
+                $script:resolve.AutopilotDevices += New-ScrappedAutopilotFixture -Id other -DeviceId unrelated -ManagedId INTUNE1 -Serial DIFFERENT
+            }
+        }
+        $records = Resolve-ScrappedDeviceRecords @script:resolve
+        $records.Count | Should -Be 1
+        $records[0].MatchStatus | Should -Be Excluded
+        $records[0].AmbiguityReason | Should -Be ConflictingIdentifiers
+        (New-DeviceDeletionPlan -TenantId tenant1 -RunId r1 -Workflow Scrapped -Records $records).Operations.Count | Should -Be 0
+    }
+
+    It 'indexes unrelated inventory once instead of rereading it for every input serial' {
+        $counter = [PSCustomObject]@{ Reads = 0 }
+        $unrelated = New-ScrappedIntuneFixture -Id unrelated -Serial unrelated
+        $unrelated.PSObject.Properties.Remove('AzureAdDeviceId')
+        $unrelated | Add-Member -MemberType ScriptProperty -Name AzureAdDeviceId -Value {
+            $counter.Reads++
+            return 'unrelated'
+        }.GetNewClosure()
+        $script:resolve.IntuneDevices = @(1..30 | ForEach-Object { $unrelated })
+        $script:resolve.AutopilotDevices = @()
+        $script:resolve.SerialNumbers = @(1..20 | ForEach-Object { "MISSING-$_" })
+        $records = Resolve-ScrappedDeviceRecords @script:resolve
+        $records.Count | Should -Be 20
+        @($records | Where-Object MatchStatus -ne NotFound).Count | Should -Be 0
+        $counter.Reads | Should -BeLessOrEqual 60
+    }
+
+    It 'logs resolution boundaries and progress without changing the report rows' {
+        $script:resolve.SerialNumbers = @('SERIAL1') + @(1..200 | ForEach-Object { "MISSING-$_" })
+        $logPath = Join-Path $TestDrive 'resolution.log'
+        $withoutLogging = Resolve-ScrappedDeviceRecords @script:resolve
+        $withLogging = Resolve-ScrappedDeviceRecords @script:resolve -LogPath $logPath
+        ($withLogging | ConvertTo-Json -Depth 10) | Should -BeExactly ($withoutLogging | ConvertTo-Json -Depth 10)
+        $log = Get-Content -LiteralPath $logPath -Raw
+        $log | Should -Match 'Event=ScrappedResolutionStarted InputSerials=201 Entra=1 Intune=1 Autopilot=1'
+        $log | Should -Match 'Event=ScrappedIndexesBuilt ElapsedMilliseconds=\d+'
+        $log | Should -Match 'Event=ScrappedResolutionProgress Processed=100/201'
+        $log | Should -Match 'Event=ScrappedResolutionProgress Processed=200/201'
+        $log | Should -Match 'Event=ScrappedResolutionCompleted Processed=201/201 Rows=203'
+    }
+
     It 'does not correlate an Entra object by its display name alone' {
         $script:entra.DeviceId = 'different'
         $script:entra.DisplayName = 'SERIAL1'

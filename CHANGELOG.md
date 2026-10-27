@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Index scrapped-device stable references and group deletion-plan rows by serial
+  once instead of rescanning full inventories for every input. Preserve
+  duplicate/conflicting records and existing dependency rules. Log resolution
+  progress and separate initial CSV export and plan-building boundaries.
 - Stream per-device deletion progress to `ExecutionLog.txt` (`DeletionStarted`,
   `PhaseStarted`, `BatchSubmitting`, `ActionResult` with `Progress=n/total` and
   device name/serial, `DeletionPhasesCompleted`) so long runs can be followed

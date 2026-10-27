@@ -21,6 +21,27 @@ now require `-Verbose`; DEBUG uses `-Debug`. Those streams are not duplicated
 in the normal log. The deletion journal remains the submission/retry evidence.
 See [Reporting.md](Reporting.md#administrator-logging-and-reconciliation).
 
+## Scrapped-device preparation takes a long time with CPU activity
+
+Serial correlation and initial report generation run locally after discovery;
+they do not call Graph. Earlier versions scanned the complete Intune and
+Autopilot inventories for every input serial, including repeatedly rebuilding
+the same managed-device ID list inside the Intune scan. Plan building also
+repeatedly scanned all correlation rows. Large CSVs combined with large tenant
+inventories could therefore spend many minutes on CPU-bound preparation,
+without new log lines. CPU activity alone cannot establish that a run is
+healthy or identify its current step.
+
+Current code indexes stable references and groups plan rows once, while
+retaining all related records for conflict detection. It logs resolution
+progress every 100 input serials, elapsed time, and separate initial CSV
+export/plan-building boundaries. Follow `ExecutionLog.txt` with
+`Get-Content -LiteralPath '<run folder>\ExecutionLog.txt' -Wait` to distinguish
+these stages from Graph batch submission. Already-running processes continue
+using their loaded code; changing files does not accelerate that run.
+Before starting another run, preserve reports and the journal and establish
+whether any DELETE was submitted. Do not start overlapping destructive runs.
+
 ## "Missing required Microsoft Graph PowerShell module(s)"
 
 Install the modules named in the error message, for example:

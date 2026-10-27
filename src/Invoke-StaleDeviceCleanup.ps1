@@ -163,6 +163,7 @@ $getScrappedSerialsCommand = Get-Command -Name 'Get-ScrappedDeviceSerialNumbers'
 $showScrappedSummaryCommand = Get-Command -Name 'Show-ScrappedDeviceSummary' -ErrorAction SilentlyContinue
 $showCleanupSummaryCommand = Get-Command -Name 'Show-CleanupSummary' -ErrorAction SilentlyContinue
 $batchCommand = Get-Command -Name 'Invoke-DeviceDeletionPlan' -ErrorAction SilentlyContinue
+$scrappedResolverCommand = Get-Command -Name 'Resolve-ScrappedDeviceRecords' -ErrorAction SilentlyContinue
 $moduleIsCurrent = $loadedModule `
     -and $loadedModule.Version -eq $requiredModuleVersion `
     -and $newRunSummaryCommand `
@@ -179,6 +180,8 @@ $moduleIsCurrent = $loadedModule `
     -and $showCleanupSummaryCommand.Parameters.ContainsKey('Simulation') `
     -and $batchCommand `
     -and $batchCommand.Parameters.ContainsKey('OperationLabels') `
+    -and $scrappedResolverCommand `
+    -and $scrappedResolverCommand.Parameters.ContainsKey('LogPath') `
     -and (Get-Command -Name 'Get-DeviceDeletionLogLabel' -ErrorAction SilentlyContinue)
 if (-not $moduleIsCurrent) {
     Import-Module -Name $modulePath -Force
@@ -306,7 +309,8 @@ try {
             -IntuneDevices $intuneDevices -AutopilotDevices $autopilotDevices -RunId $runId `
             -ProtectedEntraObjectIds $protectedEntraObjectIds -ProtectedEntraDeviceIds $protectedEntraDeviceIds `
             -ProtectedSerialNumbers $protectedSerialNumbers -ProtectedDeviceNames $protectedDeviceNames `
-            -ProtectedNamePatterns $ProtectedDeviceNamePattern -AllowOnPremisesSyncedDeletion:$AllowOnPremisesSyncedDeletion
+            -ProtectedNamePatterns $ProtectedDeviceNamePattern -AllowOnPremisesSyncedDeletion:$AllowOnPremisesSyncedDeletion `
+            -LogPath $logPath
         $scrappedMatchedRecords = @($scrappedDeviceRecords | Where-Object MatchStatus -eq 'Matched')
         $scrappedMatched = @($scrappedMatchedRecords | Select-Object -ExpandProperty NormalizedSerialNumber -Unique).Count
         $scrappedAmbiguous = @($scrappedDeviceRecords | Where-Object MatchStatus -eq 'Ambiguous' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique).Count
@@ -316,11 +320,15 @@ try {
         $scrappedEntraTargets = @($scrappedMatchedRecords | Where-Object EntraObjectId | Select-Object -ExpandProperty EntraObjectId -Unique).Count
         Write-CleanupLog -Message "Scrapped device resolution: InputSerials=$($scrappedSerialNumbers.Count) MatchedSerials=$scrappedMatched AmbiguousSerials=$scrappedAmbiguous NotFoundSerials=$scrappedNotFound; AutopilotTargets=$scrappedAutopilotTargets IntuneTargets=$scrappedIntuneTargets EntraTargets=$scrappedEntraTargets." -Level INFO -LogPath $logPath
 
+        Write-CleanupLog -Message "Event=ReportExportStarted Report=ScrappedDeviceResults.csv Rows=$($scrappedDeviceRecords.Count)" -LogPath $logPath
         Export-ReportCsv -InputObject $scrappedDeviceRecords -Path (Join-Path $resolvedOutputPath 'ScrappedDeviceResults.csv')
+        Write-CleanupLog -Message 'Event=ReportExportCompleted Report=ScrappedDeviceResults.csv' -LogPath $logPath
         Show-ScrappedDeviceSummary -ScrappedDeviceRecords $scrappedDeviceRecords -OutputPath $resolvedOutputPath `
             -CsvDuplicateCount $scrappedCsvStatistics.DuplicateRowCount -TenantId $connectedContext.TenantId `
             -Mode $Mode -Simulation ([bool]$WhatIfPreference)
+        Write-CleanupLog -Message 'Event=DeletionPlanStarted Workflow=Scrapped' -LogPath $logPath
         $deletionPlan = New-DeviceDeletionPlan -TenantId $connectedContext.TenantId -RunId $runId -Workflow Scrapped -Records $scrappedDeviceRecords
+        Write-CleanupLog -Message "Event=DeletionPlanCompleted Workflow=Scrapped Operations=$($deletionPlan.Operations.Count)" -LogPath $logPath
         $deletionPlan | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $resolvedOutputPath 'DeletionPlan.json') -Encoding utf8 -WhatIf:$false
         $approvalHash = $deletionPlan.Hash
         Write-Host "Tenant: $($deletionPlan.TenantId); unique operations: $($deletionPlan.Operations.Count); plan hash: $approvalHash"
