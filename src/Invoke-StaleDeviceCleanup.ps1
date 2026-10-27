@@ -177,7 +177,9 @@ $moduleIsCurrent = $loadedModule `
     -and $showScrappedSummaryCommand.Parameters.ContainsKey('Simulation') `
     -and $showCleanupSummaryCommand `
     -and $showCleanupSummaryCommand.Parameters.ContainsKey('Simulation') `
-    -and $batchCommand
+    -and $batchCommand `
+    -and $batchCommand.Parameters.ContainsKey('OperationLabels') `
+    -and (Get-Command -Name 'Get-DeviceDeletionLogLabel' -ErrorAction SilentlyContinue)
 if (-not $moduleIsCurrent) {
     Import-Module -Name $modulePath -Force
 }
@@ -358,6 +360,7 @@ try {
 
         $results = @(Invoke-DeviceDeletionPlan -Plan $deletionPlan -ApprovalHash $approvalHash -Mode $Mode `
             -ConfirmDeletion:$confirmationGranted -BatchSize $BatchSize -JournalPath $journalPath -LogPath $logPath `
+            -OperationLabels (Get-DeviceDeletionLogLabel -Records $scrappedDeviceRecords) `
             -WhatIf:$WhatIfPreference -Confirm:$false -VerifyDeletion:$VerifyDeletion)
         Set-DeviceDeletionResults -Workflow Scrapped -Records $scrappedDeviceRecords -Results $results
 
@@ -424,6 +427,7 @@ try {
     if ($shouldAttemptDeletion -and $discoveryComplete) {
         $results = @(Invoke-DeviceDeletionPlan -Plan $deletionPlan -ApprovalHash $approvalHash -Mode $Mode `
             -ConfirmDeletion:$confirmationGranted -BatchSize $BatchSize -JournalPath $journalPath -LogPath $logPath `
+            -OperationLabels (Get-DeviceDeletionLogLabel -Records $allEvaluatedDevices) `
             -WhatIf:$WhatIfPreference -Confirm:$false -VerifyDeletion:$VerifyDeletion)
         Set-DeviceDeletionResults -Workflow Stale -Records $allEvaluatedDevices -Results $results
         $deletionErrors = @($results | Where-Object { $_.Status -in 'RemovalFailed', 'OutcomeUnknown', 'BlockedDependency' }).Count

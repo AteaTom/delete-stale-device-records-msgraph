@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Stream per-device deletion progress to `ExecutionLog.txt` (`DeletionStarted`,
+  `PhaseStarted`, `BatchSubmitting`, `ActionResult` with `Progress=n/total` and
+  device name/serial, `DeletionPhasesCompleted`) so long runs can be followed
+  live. Device labels are log-only and not part of the approved plan hash.
+- Write `ExecutionLog.txt` during `-WhatIf` runs; previously log lines emitted
+  inside the simulated deletion step were suppressed by `-WhatIf`.
 - Route existing AD-sync and Autopilot protection exclusions to
   `ADSyncedDevices.csv` and `AutopilotProtectedDevices.csv`, removing them from
   `ExcludedDevices.csv` without changing primary reasons or deletion eligibility.
