@@ -412,6 +412,24 @@ Describe 'Guarded JSON batch deletion' {
         Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1 -Exactly
     }
 
+    It 'keeps scrapped dependencies within each serial and unions shared-operation prerequisites' {
+        $records = @(
+            (New-ScrappedBatchRecord -Serial serial1 -IntuneId intune1 -AutopilotId ap1),
+            (New-ScrappedBatchRecord -Serial SERIAL1 -IntuneId intune2 -AutopilotId ap2),
+            (New-ScrappedBatchRecord -Serial serial2 -IntuneId intune3 -AutopilotId ap3)
+        )
+        $records[2].EntraObjectId = 'entra2'
+        $plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records $records
+        ($plan.Operations | Where-Object Id -eq autopilot-ap1).Dependencies | Should -Be @('intune-intune1', 'intune-intune2')
+        ($plan.Operations | Where-Object Id -eq entra-entra1).Dependencies |
+            Should -Be @('autopilot-ap1', 'autopilot-ap2', 'intune-intune1', 'intune-intune2')
+        ($plan.Operations | Where-Object Id -eq entra-entra2).Dependencies | Should -Be @('autopilot-ap3', 'intune-intune3')
+        $records[2].EntraObjectId = 'entra1'
+        $sharedPlan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records $records
+        ($sharedPlan.Operations | Where-Object Id -eq entra-entra1).Dependencies |
+            Should -Be @('autopilot-ap1', 'autopilot-ap2', 'autopilot-ap3', 'intune-intune1', 'intune-intune2', 'intune-intune3')
+    }
+
     It 'writes intent before making the destructive call' {
         Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup {
             (Get-Content $script:journalPath -Tail 1 | ConvertFrom-Json).Event | Should -Be 'Submitting'

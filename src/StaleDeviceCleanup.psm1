@@ -1373,13 +1373,30 @@ function Resolve-ScrappedDeviceRecords {
         [string[]]$ProtectedSerialNumbers = @(),
         [string[]]$ProtectedDeviceNames = @(),
         [string[]]$ProtectedNamePatterns = @(),
-        [switch]$AllowOnPremisesSyncedDeletion
+        [switch]$AllowOnPremisesSyncedDeletion,
+        [string]$LogPath
     )
 
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    if ($LogPath) {
+        Write-CleanupLog -Message "Event=ScrappedResolutionStarted InputSerials=$($SerialNumbers.Count) Entra=$($EntraDevices.Count) Intune=$($IntuneDevices.Count) Autopilot=$($AutopilotDevices.Count)" -LogPath $LogPath
+    }
     $intuneBySerial = @{}
     $intuneById = @{}
+    $intuneByDeviceReference = @{}
+    $intuneRecordsById = @{}
     foreach ($d in $IntuneDevices) {
-        if ($d.Id) { $intuneById[[string]$d.Id] = $d }
+        if ($d.Id) {
+            $key = [string]$d.Id
+            $intuneById[$key] = $d
+            if (-not $intuneRecordsById.ContainsKey($key)) { $intuneRecordsById[$key] = [System.Collections.Generic.List[object]]::new() }
+            $intuneRecordsById[$key].Add($d)
+        }
+        if ($d.AzureAdDeviceId) {
+            $key = [string]$d.AzureAdDeviceId
+            if (-not $intuneByDeviceReference.ContainsKey($key)) { $intuneByDeviceReference[$key] = [System.Collections.Generic.List[object]]::new() }
+            $intuneByDeviceReference[$key].Add($d)
+        }
         $serial = ConvertTo-NormalizedSerialNumber -SerialNumber $d.SerialNumber
         if ($serial) {
             if (-not $intuneBySerial.ContainsKey($serial)) { $intuneBySerial[$serial] = [System.Collections.Generic.List[object]]::new() }
@@ -1388,7 +1405,19 @@ function Resolve-ScrappedDeviceRecords {
     }
 
     $autopilotBySerial = @{}
+    $autopilotByDeviceReference = @{}
+    $autopilotByManagedReference = @{}
     foreach ($a in $AutopilotDevices) {
+        if ($a.AzureActiveDirectoryDeviceId) {
+            $key = [string]$a.AzureActiveDirectoryDeviceId
+            if (-not $autopilotByDeviceReference.ContainsKey($key)) { $autopilotByDeviceReference[$key] = [System.Collections.Generic.List[object]]::new() }
+            $autopilotByDeviceReference[$key].Add($a)
+        }
+        if ($a.ManagedDeviceId) {
+            $key = [string]$a.ManagedDeviceId
+            if (-not $autopilotByManagedReference.ContainsKey($key)) { $autopilotByManagedReference[$key] = [System.Collections.Generic.List[object]]::new() }
+            $autopilotByManagedReference[$key].Add($a)
+        }
         $serial = ConvertTo-NormalizedSerialNumber -SerialNumber $a.SerialNumber
         if ($serial) {
             if (-not $autopilotBySerial.ContainsKey($serial)) { $autopilotBySerial[$serial] = [System.Collections.Generic.List[object]]::new() }
@@ -1421,7 +1450,15 @@ function Resolve-ScrappedDeviceRecords {
         return $null
     }
 
+    if ($LogPath) {
+        Write-CleanupLog -Message "Event=ScrappedIndexesBuilt ElapsedMilliseconds=$($timer.ElapsedMilliseconds)" -LogPath $LogPath
+    }
+    $processedSerials = 0
     foreach ($inputSerial in $SerialNumbers) {
+        if ($LogPath -and $processedSerials -gt 0 -and $processedSerials % 100 -eq 0) {
+            Write-CleanupLog -Message "Event=ScrappedResolutionProgress Processed=$processedSerials/$($SerialNumbers.Count) ElapsedMilliseconds=$($timer.ElapsedMilliseconds)" -LogPath $LogPath
+        }
+        $processedSerials++
         $normalized = ConvertTo-NormalizedSerialNumber -SerialNumber $inputSerial
 
         # Plain if/else (not an if-expression) avoids PowerShell collapsing an
@@ -1461,17 +1498,28 @@ function Resolve-ScrappedDeviceRecords {
             @($autopilotMatches | Where-Object AzureActiveDirectoryDeviceId | Select-Object -ExpandProperty AzureActiveDirectoryDeviceId)
         ) | Where-Object { $_ -and $_ -ne '00000000-0000-0000-0000-000000000000' } | Sort-Object -Unique
         $managedIds = @($intuneMatches | Select-Object -ExpandProperty Id)
-        foreach ($related in $AutopilotDevices) {
-            if (($related.AzureActiveDirectoryDeviceId -and $related.AzureActiveDirectoryDeviceId -in $stableIds) -or
-                ($related.ManagedDeviceId -and $related.ManagedDeviceId -in $managedIds)) {
-                if ((ConvertTo-NormalizedSerialNumber $related.SerialNumber) -ne $normalized) { $exclusion = 'ConflictingIdentifiers' }
+        # Retain all records per reference: a duplicate with a different serial
+        # must still block deletion, even when it is outside the input CSV.
+        $relatedAutopilot = @(
+            foreach ($id in $stableIds) {
+                if ($autopilotByDeviceReference.ContainsKey([string]$id)) { $autopilotByDeviceReference[[string]$id] }
             }
-        }
-        foreach ($related in $IntuneDevices) {
-            if (($related.AzureAdDeviceId -and $related.AzureAdDeviceId -in $stableIds) -or
-                ($related.Id -in @($autopilotMatches | Where-Object ManagedDeviceId | Select-Object -ExpandProperty ManagedDeviceId))) {
-                if ((ConvertTo-NormalizedSerialNumber $related.SerialNumber) -ne $normalized) { $exclusion = 'ConflictingIdentifiers' }
+            foreach ($id in $managedIds) {
+                if ($id -and $autopilotByManagedReference.ContainsKey([string]$id)) { $autopilotByManagedReference[[string]$id] }
             }
+        )
+        $relatedIntune = @(
+            foreach ($id in $stableIds) {
+                if ($intuneByDeviceReference.ContainsKey([string]$id)) { $intuneByDeviceReference[[string]$id] }
+            }
+            foreach ($match in $autopilotMatches) {
+                if ($match.ManagedDeviceId -and $intuneRecordsById.ContainsKey([string]$match.ManagedDeviceId)) {
+                    $intuneRecordsById[[string]$match.ManagedDeviceId]
+                }
+            }
+        )
+        foreach ($related in $relatedAutopilot + $relatedIntune) {
+            if ((ConvertTo-NormalizedSerialNumber $related.SerialNumber) -ne $normalized) { $exclusion = 'ConflictingIdentifiers' }
         }
         # A managed-device relationship can bridge an Autopilot identity without
         # an Entra reference, but it cannot override a conflicting reference.
@@ -1687,6 +1735,9 @@ function Resolve-ScrappedDeviceRecords {
         elseif ($record.EntraObjectId) { 'StableDeviceIdReference' }
         else { 'ExactSerialNumber' }
         $record | Add-Member -NotePropertyName CorrelationMethod -NotePropertyValue $method
+    }
+    if ($LogPath) {
+        Write-CleanupLog -Message "Event=ScrappedResolutionCompleted Processed=$processedSerials/$($SerialNumbers.Count) Rows=$($results.Count) ElapsedMilliseconds=$($timer.ElapsedMilliseconds)" -LogPath $LogPath
     }
     return , $results
 }

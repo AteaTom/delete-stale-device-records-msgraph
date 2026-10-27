@@ -111,6 +111,15 @@ operation has a final `Event=ActionAttention` warning with run, resource,
 object ID, outcome, attempts, HTTP status and reason. A failed retry budget is
 visible even when no final Graph response exists.
 
+Before deletion in the scrapped workflow, the log records
+`Event=ScrappedResolutionStarted` with inventory counts,
+`Event=ScrappedIndexesBuilt`, `Event=ScrappedResolutionProgress` after each
+100 input serials (when more remain), and `Event=ScrappedResolutionCompleted`.
+Progress and completion include elapsed milliseconds. Initial CSV export and
+plan building have separate `ReportExportStarted`/`ReportExportCompleted` and
+`DeletionPlanStarted`/`DeletionPlanCompleted` events. These local preparation
+events do not mean any DELETE has been submitted.
+
 During deletion, `ExecutionLog.txt` is appended live so it can be followed with
 `Get-Content -Wait`: `Event=DeletionStarted`, `Event=PhaseStarted` per
 resource, `Event=BatchSubmitting` before each Graph batch, one
