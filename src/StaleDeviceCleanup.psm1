@@ -26,6 +26,7 @@ $script:InvalidSerialNumbers = @(
 )
 
 . (Join-Path $PSScriptRoot 'DeviceDeletionBatch.ps1')
+. (Join-Path $PSScriptRoot 'DeviceCleanupResume.ps1')
 
 #region Logging
 
@@ -645,6 +646,47 @@ function Get-EffectiveLastActivity {
 
 #region Protection
 
+function New-DeviceProtectionIndex {
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [string[]]$ProtectedEntraObjectIds = @(),
+        [string[]]$ProtectedEntraDeviceIds = @(),
+        [string[]]$ProtectedSerialNumbers = @(),
+        [string[]]$ProtectedDeviceNames = @(),
+        [string[]]$ProtectedNamePatterns = @()
+    )
+
+    $objectIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($id in $ProtectedEntraObjectIds) { if ($id) { $objectIds.Add($id) | Out-Null } }
+
+    $deviceIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($id in $ProtectedEntraDeviceIds) { if ($id) { $deviceIds.Add($id) | Out-Null } }
+
+    $serialNumbers = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($serial in $ProtectedSerialNumbers) {
+        $normalized = ConvertTo-NormalizedSerialNumber -SerialNumber $serial
+        if ($normalized) { $serialNumbers.Add($normalized) | Out-Null }
+    }
+
+    $deviceNames = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $deviceNamePatterns = [System.Collections.Generic.List[string]]::new()
+    foreach ($name in $ProtectedDeviceNames) {
+        if ([string]::IsNullOrEmpty($name)) { continue }
+        if ($name -match '[*?\[\]]') { $deviceNamePatterns.Add($name) }
+        else { $deviceNames.Add($name) | Out-Null }
+    }
+
+    return [PSCustomObject]@{
+        EntraObjectIds = $objectIds
+        EntraDeviceIds = $deviceIds
+        SerialNumbers = $serialNumbers
+        DeviceNames = $deviceNames
+        DeviceNamePatterns = $deviceNamePatterns.ToArray()
+        NamePatterns = @($ProtectedNamePatterns)
+    }
+}
+
 function Test-DeviceProtection {
     <#
         .SYNOPSIS
@@ -660,29 +702,39 @@ function Test-DeviceProtection {
         [string[]]$ProtectedEntraDeviceIds = @(),
         [string[]]$ProtectedSerialNumbers = @(),
         [string[]]$ProtectedDeviceNames = @(),
-        [string[]]$ProtectedNamePatterns = @()
+        [string[]]$ProtectedNamePatterns = @(),
+        [PSCustomObject]$ProtectionIndex
     )
 
-    if ($Device.Id -and $ProtectedEntraObjectIds -contains $Device.Id) {
+    if (-not $ProtectionIndex) {
+        $ProtectionIndex = New-DeviceProtectionIndex -ProtectedEntraObjectIds $ProtectedEntraObjectIds `
+            -ProtectedEntraDeviceIds $ProtectedEntraDeviceIds -ProtectedSerialNumbers $ProtectedSerialNumbers `
+            -ProtectedDeviceNames $ProtectedDeviceNames -ProtectedNamePatterns $ProtectedNamePatterns
+    }
+
+    if ($Device.Id -and $ProtectionIndex.EntraObjectIds.Contains([string]$Device.Id)) {
         return [PSCustomObject]@{ IsProtected = $true; Reason = 'Entra object id matches the protected device list.' }
     }
-    if ($Device.DeviceId -and $ProtectedEntraDeviceIds -contains $Device.DeviceId) {
+    if ($Device.DeviceId -and $ProtectionIndex.EntraDeviceIds.Contains([string]$Device.DeviceId)) {
         return [PSCustomObject]@{ IsProtected = $true; Reason = 'Entra device id matches the protected device list.' }
     }
     if ($IntuneSerialNumber) {
         $normalized = ConvertTo-NormalizedSerialNumber -SerialNumber $IntuneSerialNumber
-        if ($normalized -and ($ProtectedSerialNumbers | ForEach-Object { ConvertTo-NormalizedSerialNumber -SerialNumber $_ }) -contains $normalized) {
+        if ($normalized -and $ProtectionIndex.SerialNumbers.Contains($normalized)) {
             return [PSCustomObject]@{ IsProtected = $true; Reason = 'Serial number matches the protected device list.' }
         }
     }
     if ($Device.DisplayName) {
         # -like also matches plain names with no wildcard chars, so CSV DeviceName entries may contain literal names or wildcard patterns.
-        foreach ($name in $ProtectedDeviceNames) {
+        if ($ProtectionIndex.DeviceNames.Contains([string]$Device.DisplayName)) {
+            return [PSCustomObject]@{ IsProtected = $true; Reason = 'Device name matches the protected device list.' }
+        }
+        foreach ($name in $ProtectionIndex.DeviceNamePatterns) {
             if ($Device.DisplayName -like $name) {
                 return [PSCustomObject]@{ IsProtected = $true; Reason = 'Device name matches the protected device list.' }
             }
         }
-        foreach ($pattern in $ProtectedNamePatterns) {
+        foreach ($pattern in $ProtectionIndex.NamePatterns) {
             if ($Device.DisplayName -like $pattern) {
                 return [PSCustomObject]@{ IsProtected = $true; Reason = "Device name matches protected pattern '$pattern'." }
             }
@@ -721,6 +773,9 @@ function Get-StaleDeviceCandidates {
 
     $results = [System.Collections.Generic.List[object]]::new()
     $nowUtc = (Get-Date).ToUniversalTime()
+    $protectionIndex = New-DeviceProtectionIndex -ProtectedEntraObjectIds $ProtectedEntraObjectIds `
+        -ProtectedEntraDeviceIds $ProtectedEntraDeviceIds -ProtectedSerialNumbers $ProtectedSerialNumbers `
+        -ProtectedDeviceNames $ProtectedDeviceNames -ProtectedNamePatterns $ProtectedNamePatterns
 
     foreach ($device in $EntraDevices) {
         $platform = Resolve-DevicePlatform -OperatingSystem $device.OperatingSystem
@@ -735,7 +790,7 @@ function Get-StaleDeviceCandidates {
         $protection = Test-DeviceProtection -Device $device -IntuneSerialNumber $intuneSerial `
             -ProtectedEntraObjectIds $ProtectedEntraObjectIds -ProtectedEntraDeviceIds $ProtectedEntraDeviceIds `
             -ProtectedSerialNumbers $ProtectedSerialNumbers -ProtectedDeviceNames $ProtectedDeviceNames `
-            -ProtectedNamePatterns $ProtectedNamePatterns
+            -ProtectedNamePatterns $ProtectedNamePatterns -ProtectionIndex $protectionIndex
 
         $decision = $null
         $reasonCode = $null
@@ -1087,14 +1142,33 @@ function Get-CleanupActionRecords {
     if (-not $Plan) { return @() }
     $byId = @{}
     foreach ($result in $Results) { $byId[$result.Id] = $result }
+    $recordsByTarget = @{
+        Entra = @{}
+        Intune = @{}
+        Autopilot = @{}
+    }
+    $recordFields = @{
+        Entra = 'EntraObjectId'
+        Intune = 'IntuneManagedDeviceId'
+        Autopilot = 'AutopilotIdentityId'
+    }
+    foreach ($record in $Records) {
+        foreach ($resource in $recordFields.Keys) {
+            $idField = $recordFields[$resource]
+            if (-not $record.PSObject.Properties[$idField] -or -not $record.$idField) { continue }
+            $objectId = [string]$record.$idField
+            if (-not $recordsByTarget[$resource].ContainsKey($objectId)) {
+                $recordsByTarget[$resource][$objectId] = [System.Collections.Generic.List[object]]::new()
+            }
+            $recordsByTarget[$resource][$objectId].Add($record)
+        }
+    }
     $finalizedUtc = [datetime]::UtcNow.ToString('o')
     foreach ($operation in $Plan.Operations) {
-        $idField = switch ($operation.Resource) {
-            Entra { 'EntraObjectId' }
-            Intune { 'IntuneManagedDeviceId' }
-            Autopilot { 'AutopilotIdentityId' }
-        }
-        $related = @($Records | Where-Object { $_.PSObject.Properties[$idField] -and $_.$idField -eq $operation.ObjectId })
+        $related = if ($recordsByTarget.ContainsKey($operation.Resource) -and
+            $recordsByTarget[$operation.Resource].ContainsKey([string]$operation.ObjectId)) {
+            $recordsByTarget[$operation.Resource][[string]$operation.ObjectId].ToArray()
+        } else { @() }
         $names = @(
             foreach ($row in $related) {
                 foreach ($field in 'DeviceName', 'EntraDeviceName', 'IntuneDeviceName') {
@@ -1378,6 +1452,9 @@ function Resolve-ScrappedDeviceRecords {
     )
 
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    $protectionIndex = New-DeviceProtectionIndex -ProtectedEntraObjectIds $ProtectedEntraObjectIds `
+        -ProtectedEntraDeviceIds $ProtectedEntraDeviceIds -ProtectedSerialNumbers $ProtectedSerialNumbers `
+        -ProtectedDeviceNames $ProtectedDeviceNames -ProtectedNamePatterns $ProtectedNamePatterns
     if ($LogPath) {
         Write-CleanupLog -Message "Event=ScrappedResolutionStarted InputSerials=$($SerialNumbers.Count) Entra=$($EntraDevices.Count) Intune=$($IntuneDevices.Count) Autopilot=$($AutopilotDevices.Count)" -LogPath $LogPath
     }
@@ -1595,7 +1672,7 @@ function Resolve-ScrappedDeviceRecords {
             $protection = Test-DeviceProtection -Device $device -IntuneSerialNumber $inputSerial `
                 -ProtectedEntraObjectIds $ProtectedEntraObjectIds -ProtectedEntraDeviceIds $ProtectedEntraDeviceIds `
                 -ProtectedSerialNumbers $ProtectedSerialNumbers -ProtectedDeviceNames $ProtectedDeviceNames `
-                -ProtectedNamePatterns $ProtectedNamePatterns
+                -ProtectedNamePatterns $ProtectedNamePatterns -ProtectionIndex $protectionIndex
             if ($protection.IsProtected) { $exclusion = 'ProtectedDevice' }
         }
         if ($exclusion) {
@@ -1829,8 +1906,11 @@ function Initialize-ProjectExecution {
     $startTimeUtc = (Get-Date).ToUniversalTime()
     $runFolderName = $startTimeUtc.ToString('yyyyMMdd-HHmmss')
     $resolvedOutputPath = Join-Path -Path $OutputPath -ChildPath $runFolderName
+    if (Test-Path -LiteralPath $resolvedOutputPath) {
+        $resolvedOutputPath = Join-Path -Path $OutputPath -ChildPath "$runFolderName-$runId"
+    }
 
-    New-Item -Path $resolvedOutputPath -ItemType Directory -Force | Out-Null
+    New-Item -Path $resolvedOutputPath -ItemType Directory -ErrorAction Stop | Out-Null
     $logPath = Join-Path -Path $resolvedOutputPath -ChildPath 'ExecutionLog.txt'
     New-Item -Path $logPath -ItemType File -Force | Out-Null
 
@@ -1901,6 +1981,9 @@ function Complete-ProjectExecution {
 #endregion Execution lifecycle
 
 Export-ModuleMember -Function @(
+    'Get-LatestDeviceCleanupResumeSource',
+    'Read-DeviceCleanupResumeSource',
+    'Resolve-DeviceCleanupResumeRecords',
     'Write-CleanupLog',
     'Test-Prerequisites',
     'Connect-DeviceCleanupGraph',

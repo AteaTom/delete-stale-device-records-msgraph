@@ -1,4 +1,5 @@
 #Requires -Version 7.0
+
 <#
     .SYNOPSIS
     Identifies, reports on, and (with explicit confirmation) removes stale
@@ -15,6 +16,14 @@
     stale-device workflow. The explicit scrapped-device workflow is the only
     path that removes Intune records.
 
+    ResumeFromRunPath selects an original scrapped run explicitly; ResumeLatest
+    selects the latest validated source under OutputPath by plan creation time.
+    Both reload current inventories/protection, verify original Autopilot IDs
+    read-only, and create a fresh Entra-only plan requiring new approval.
+    Neither replays Intune/Autopilot DELETEs or runs inactivity classification.
+    Original plan, final journal and report are preserved. Re-supply protection
+    options; prior command-line settings are not inherited.
+
     ALWAYS RUN AUDIT MODE FIRST AND REVIEW ALL GENERATED REPORTS BEFORE USING
     A DESTRUCTIVE MODE.
 
@@ -22,7 +31,8 @@
     Number of days of inactivity before a device is considered stale. Minimum
     and default value is 180. A timestamp exactly equal to the cutoff is
     treated as stale (inclusive comparison). Available only in the default
-    inactivity parameter set; cannot be combined with -ScrappedDevices.
+    inactivity parameter set; cannot be combined with -ScrappedDevices,
+    -ResumeFromRunPath or -ResumeLatest.
 
     .PARAMETER Mode
     Audit (default, never deletes), Interactive (requires typing DELETE), or
@@ -30,10 +40,14 @@
 
     .PARAMETER OutputPath
     Root folder under which a timestamped run folder is created for reports
-    and logs. Defaults to .\output.
+    and logs. Defaults to .\output relative to the current working directory.
+    Also the immediate-subfolder source search root for -ResumeLatest.
+    An existing timestamp folder is preserved using a run-ID suffix.
 
     .PARAMETER TenantId
     Optional tenant id to validate the connected Graph context against.
+    Resume defaults to the original source tenant and rejects a mismatch.
+    With -ResumeLatest this also filters eligible local source journals.
 
     .PARAMETER ConfirmDeletion
     Required in Automatic mode to allow deletion to proceed. Has no effect in
@@ -61,6 +75,8 @@
     Selects explicit hardware retirement, without any inactivity evaluation.
     Removes safely correlated Intune records, then Windows Autopilot identities,
     then Entra objects after all related Autopilot DELETE requests are accepted.
+    HTTP 204 is accepted; unexpected HTTP 200 requires exact-ID read-back
+    returning 404. Unresolved identities block dependent Entra deletion.
     Failed prerequisites block dependent targets; independent targets continue.
     Protection, platform, synchronization and ambiguity checks remain. Audit
     is still the default; this switch alone never deletes.
@@ -78,6 +94,30 @@
 
     .PARAMETER BatchSize
     Maximum independent operations per JSON batch, from 1 through 20.
+
+    .PARAMETER ResumeFromRunPath
+    Resumes remaining Entra targets from a previous scrapped run folder.
+    Reads its approved plan, final journal and ScrappedDeviceResults.csv.
+    Rechecks current inventory/protection and exact Autopilot IDs read-only.
+    Creates a new Entra-only plan requiring fresh approval. Audit is default.
+    Pass the original protection options again; they are not inherited.
+    Requires DeletionPlan.json, DeletionJournal.jsonl ending in Event=Final,
+    and ScrappedDeviceResults.csv with matching original targets/dependencies.
+    Only unattempted/blocked Windows Entra targets with original Autopilot
+    dependencies qualify. Current management/re-registration, changed or
+    ambiguous identifiers, protection and failed read-back block deletion.
+    Mutually exclusive with ResumeLatest, ScrappedDevices and DaysInactive.
+
+    .PARAMETER ResumeLatest
+    Finds the latest valid scrapped journal with pending Entra targets in
+    immediate subfolders of OutputPath. Uses approved plan creation time.
+    Requires TenantId if eligible journals belong to multiple tenants.
+    All resume checks and fresh approval requirements remain unchanged.
+    Invalid/incomplete sources warn and are skipped; no eligible source is
+    an error before Graph connection, never fallback to stale cleanup.
+    Tied latest timestamps require ResumeFromRunPath. Does not merge sources,
+    poll for completion or update old journals with later resume outcomes.
+    Each invocation selects anew; use ResumeFromRunPath to pin a reviewed run.
 
     .PARAMETER VerifyDeletion
     Optional bounded read-back of successful IDs after batch deletion.
@@ -101,12 +141,27 @@
     .EXAMPLE
     .\Invoke-StaleDeviceCleanup.ps1 -ScrappedDevices -Mode Automatic -ConfirmDeletion -WhatIf
 
+    .EXAMPLE
+    .\Invoke-StaleDeviceCleanup.ps1 -ResumeLatest
+    Finds the latest eligible source under .\output and previews Entra targets
+    in Audit mode. Reads Graph but never submits tenant DELETE requests.
+
+    .EXAMPLE
+    .\Invoke-StaleDeviceCleanup.ps1 -ResumeLatest -Mode Interactive -OutputPath '.\output\retirement' -TenantId '<tenant-guid>'
+    Searches immediate subfolders of the specified root, displays the source,
+    rechecks eligibility and requires typing DELETE for the new Entra-only plan.
+
+    .EXAMPLE
+    .\Invoke-StaleDeviceCleanup.ps1 -ResumeFromRunPath '.\output\20261028-104650' -Mode Automatic -ConfirmDeletion -WhatIf
+    Pins the original source and simulates Entra-only execution without DELETEs.
+    Removing WhatIf would allow real deletion without an interactive prompt.
+
     .NOTES
     Exit codes:
       0 completed successfully
       1 completed with per-device errors
       2 validation or configuration failure
-      3 authentication or authorization failure
+      3 unhandled run error, including authentication or invalid resume source
       4 incomplete discovery, deletion blocked
       5 administrator cancelled
       6 destructive operation failed
@@ -142,6 +197,12 @@ param(
 
     [Parameter(ParameterSetName = 'Scrapped')]
     [switch]$AllowLegacyScrappedDeviceFormat,
+
+    [Parameter(Mandatory, ParameterSetName = 'Resume')]
+    [string]$ResumeFromRunPath,
+
+    [Parameter(Mandatory, ParameterSetName = 'ResumeLatest')]
+    [switch]$ResumeLatest,
 
     [ValidateRange(1, 20)]
     [int]$BatchSize = 20,
@@ -183,6 +244,12 @@ $moduleIsCurrent = $loadedModule `
     -and $scrappedResolverCommand `
     -and $scrappedResolverCommand.Parameters.ContainsKey('LogPath') `
     -and (Get-Command -Name 'Get-DeviceDeletionLogLabel' -ErrorAction SilentlyContinue)
+if ($PSCmdlet.ParameterSetName -in 'Resume', 'ResumeLatest' -and
+    (-not (Get-Command -Name 'Read-DeviceCleanupResumeSource' -ErrorAction SilentlyContinue) -or
+        -not (Get-Command -Name 'Resolve-DeviceCleanupResumeRecords' -ErrorAction SilentlyContinue) -or
+        -not (Get-Command -Name 'Get-LatestDeviceCleanupResumeSource' -ErrorAction SilentlyContinue))) {
+    $moduleIsCurrent = $false
+}
 if (-not $moduleIsCurrent) {
     Import-Module -Name $modulePath -Force
 }
@@ -199,9 +266,16 @@ $allEvaluatedDevices = @()
 $scrappedDeviceRecords = @()
 $results = @()
 $runErrorCount = 0
+$cleanupReportsWritten = $false
+$scrappedReportWritten = $false
 $connectedContext = $null
-$scrappedWorkflow = $PSCmdlet.ParameterSetName -eq 'Scrapped'
-if ($scrappedWorkflow -and -not $ScrappedDevices) {
+$resumeSource = $null
+$resumeWorkflow = $PSCmdlet.ParameterSetName -in 'Resume', 'ResumeLatest'
+$scrappedWorkflow = $PSCmdlet.ParameterSetName -in 'Scrapped', 'Resume', 'ResumeLatest'
+if ($PSCmdlet.ParameterSetName -eq 'ResumeLatest' -and -not $ResumeLatest) {
+    throw '-ResumeLatest must be explicitly enabled.'
+}
+if ($scrappedWorkflow -and -not $resumeWorkflow -and -not $ScrappedDevices) {
     throw '-ScrappedDevices must be explicitly enabled.'
 }
 if (-not $scrappedWorkflow) {
@@ -218,6 +292,22 @@ try {
 
     Test-Prerequisites | Out-Null
 
+    if ($resumeWorkflow) {
+        if ($ResumeLatest) {
+            $latestSource = Get-LatestDeviceCleanupResumeSource -Path $OutputPath -TenantId $TenantId -LogPath $logPath
+            $ResumeFromRunPath = $latestSource.Path
+            $resumeSource = $latestSource.Source
+        } else {
+            $resumeSource = Read-DeviceCleanupResumeSource -Path $ResumeFromRunPath
+        }
+        if ($TenantId -and $TenantId -ne $resumeSource.Plan.TenantId) {
+            throw 'Resume blocked: requested tenant differs from the original approved tenant.'
+        }
+        $TenantId = $resumeSource.Plan.TenantId
+        Write-Host "Journal-based Entra resumption from run $($resumeSource.Plan.RunId), path '$ResumeFromRunPath'. Prior approval is not reused."
+        Write-CleanupLog -Message "Event=ResumeStarted SourceRunId=$($resumeSource.Plan.RunId) SourcePlanHash=$($resumeSource.Plan.Hash) SourcePath=$ResumeFromRunPath" -LogPath $logPath
+    }
+
     if (-not $scrappedWorkflow) {
         Write-CleanupLog -Message "Cutoff date (UTC): $($cutoffDateUtc.ToString('o')). Timestamps less than or equal to the cutoff are treated as stale." -Level INFO -LogPath $logPath
     }
@@ -226,7 +316,7 @@ try {
     $readScopes = @('Device.Read.All', 'DeviceManagementManagedDevices.Read.All', 'DeviceManagementServiceConfig.Read.All')
     $writeScopes = @('Directory.AccessAsUser.All')
     # Intune managed-device records are only ever removed via the scrapped-device workflow.
-    if ($scrappedWorkflow) {
+    if ($scrappedWorkflow -and -not $resumeWorkflow) {
         $writeScopes += @('DeviceManagementManagedDevices.ReadWrite.All', 'DeviceManagementServiceConfig.ReadWrite.All')
     }
     $requestedScopes = if ($Mode -eq 'Audit') { $readScopes } else { $readScopes + $writeScopes }
@@ -261,7 +351,11 @@ try {
         Write-CleanupLog -Message "Protected device input: '$ProtectedDeviceIdFile'." -Level VERBOSE -LogPath $logPath
     }
 
-    if ($scrappedWorkflow) {
+    if ($resumeWorkflow) {
+        $scrappedSerialNumbers = @($resumeSource.Records | Select-Object -ExpandProperty InputSerialNumber -Unique)
+        $scrappedCsvStatistics = [PSCustomObject]@{ DuplicateRowCount = 0 }
+        $ScrappedDeviceCsvPath = Join-Path $ResumeFromRunPath 'ScrappedDeviceResults.csv'
+    } elseif ($scrappedWorkflow) {
         $scrappedCsvStatistics = $null
         $scrappedSerialNumbers = Get-ScrappedDeviceSerialNumbers -Path $ScrappedDeviceCsvPath -Statistics ([ref]$scrappedCsvStatistics) `
             -AllowLegacyFormat:$AllowLegacyScrappedDeviceFormat
@@ -301,16 +395,23 @@ try {
         throw
     }
 
-    $indexes = New-DeviceIndexes -IntuneDevices $intuneDevices -AutopilotDevices $autopilotDevices
-
     if ($scrappedWorkflow) {
         Write-CleanupLog -Message "Loaded $($scrappedSerialNumbers.Count) unique scrapped device serial number(s) from '$ScrappedDeviceCsvPath'; ignored $($scrappedCsvStatistics.DuplicateRowCount) duplicate CSV row(s)." -Level INFO -LogPath $logPath
-        $scrappedDeviceRecords = Resolve-ScrappedDeviceRecords -SerialNumbers $scrappedSerialNumbers -EntraDevices $entraDevices `
-            -IntuneDevices $intuneDevices -AutopilotDevices $autopilotDevices -RunId $runId `
-            -ProtectedEntraObjectIds $protectedEntraObjectIds -ProtectedEntraDeviceIds $protectedEntraDeviceIds `
-            -ProtectedSerialNumbers $protectedSerialNumbers -ProtectedDeviceNames $protectedDeviceNames `
-            -ProtectedNamePatterns $ProtectedDeviceNamePattern -AllowOnPremisesSyncedDeletion:$AllowOnPremisesSyncedDeletion `
-            -LogPath $logPath
+        if ($resumeWorkflow) {
+            $scrappedDeviceRecords = @(Resolve-DeviceCleanupResumeRecords -Source $resumeSource -EntraDevices $entraDevices `
+                -IntuneDevices $intuneDevices -AutopilotDevices $autopilotDevices -RunId $runId `
+                -ProtectedEntraObjectIds $protectedEntraObjectIds -ProtectedEntraDeviceIds $protectedEntraDeviceIds `
+                -ProtectedSerialNumbers $protectedSerialNumbers -ProtectedDeviceNames $protectedDeviceNames `
+                -ProtectedNamePatterns $ProtectedDeviceNamePattern -AllowOnPremisesSyncedDeletion:$AllowOnPremisesSyncedDeletion `
+                -LogPath $logPath)
+        } else {
+            $scrappedDeviceRecords = Resolve-ScrappedDeviceRecords -SerialNumbers $scrappedSerialNumbers -EntraDevices $entraDevices `
+                -IntuneDevices $intuneDevices -AutopilotDevices $autopilotDevices -RunId $runId `
+                -ProtectedEntraObjectIds $protectedEntraObjectIds -ProtectedEntraDeviceIds $protectedEntraDeviceIds `
+                -ProtectedSerialNumbers $protectedSerialNumbers -ProtectedDeviceNames $protectedDeviceNames `
+                -ProtectedNamePatterns $ProtectedDeviceNamePattern -AllowOnPremisesSyncedDeletion:$AllowOnPremisesSyncedDeletion `
+                -LogPath $logPath
+        }
         $scrappedMatchedRecords = @($scrappedDeviceRecords | Where-Object MatchStatus -eq 'Matched')
         $scrappedMatched = @($scrappedMatchedRecords | Select-Object -ExpandProperty NormalizedSerialNumber -Unique).Count
         $scrappedAmbiguous = @($scrappedDeviceRecords | Where-Object MatchStatus -eq 'Ambiguous' | Select-Object -ExpandProperty NormalizedSerialNumber -Unique).Count
@@ -320,8 +421,10 @@ try {
         $scrappedEntraTargets = @($scrappedMatchedRecords | Where-Object EntraObjectId | Select-Object -ExpandProperty EntraObjectId -Unique).Count
         Write-CleanupLog -Message "Scrapped device resolution: InputSerials=$($scrappedSerialNumbers.Count) MatchedSerials=$scrappedMatched AmbiguousSerials=$scrappedAmbiguous NotFoundSerials=$scrappedNotFound; AutopilotTargets=$scrappedAutopilotTargets IntuneTargets=$scrappedIntuneTargets EntraTargets=$scrappedEntraTargets." -Level INFO -LogPath $logPath
 
+        Set-ScrappedDeviceOutcomes -Records $scrappedDeviceRecords
         Write-CleanupLog -Message "Event=ReportExportStarted Report=ScrappedDeviceResults.csv Rows=$($scrappedDeviceRecords.Count)" -LogPath $logPath
         Export-ReportCsv -InputObject $scrappedDeviceRecords -Path (Join-Path $resolvedOutputPath 'ScrappedDeviceResults.csv')
+        $scrappedReportWritten = $true
         Write-CleanupLog -Message 'Event=ReportExportCompleted Report=ScrappedDeviceResults.csv' -LogPath $logPath
         Show-ScrappedDeviceSummary -ScrappedDeviceRecords $scrappedDeviceRecords -OutputPath $resolvedOutputPath `
             -CsvDuplicateCount $scrappedCsvStatistics.DuplicateRowCount -TenantId $connectedContext.TenantId `
@@ -370,13 +473,16 @@ try {
             -ConfirmDeletion:$confirmationGranted -BatchSize $BatchSize -JournalPath $journalPath -LogPath $logPath `
             -OperationLabels (Get-DeviceDeletionLogLabel -Records $scrappedDeviceRecords) `
             -WhatIf:$WhatIfPreference -Confirm:$false -VerifyDeletion:$VerifyDeletion)
+        $scrappedReportWritten = $false
         Set-DeviceDeletionResults -Workflow Scrapped -Records $scrappedDeviceRecords -Results $results
 
         Export-ReportCsv -InputObject $scrappedDeviceRecords -Path (Join-Path $resolvedOutputPath 'ScrappedDeviceResults.csv')
+        $scrappedReportWritten = $true
         if (@($scrappedDeviceRecords | Where-Object { $_.ErrorMessage }).Count -gt 0 -and $exitCode -eq 0) { $exitCode = 6 }
         return
     }
 
+    $indexes = New-DeviceIndexes -IntuneDevices $intuneDevices -AutopilotDevices $autopilotDevices
     $allEvaluatedDevices = Get-StaleDeviceCandidates -EntraDevices $entraDevices -Indexes $indexes -CutoffDateUtc $cutoffDateUtc `
         -RunId $runId -ProtectedEntraObjectIds $protectedEntraObjectIds -ProtectedEntraDeviceIds $protectedEntraDeviceIds `
         -ProtectedSerialNumbers $protectedSerialNumbers -ProtectedDeviceNames $protectedDeviceNames `
@@ -389,7 +495,9 @@ try {
 
     # Reports must exist before any confirmation prompt, in every mode.
     Export-CleanupReports -AllEvaluatedDevices $allEvaluatedDevices -OutputPath $resolvedOutputPath
+    $cleanupReportsWritten = $true
     Export-ReportCsv -InputObject $scrappedDeviceRecords -Path (Join-Path $resolvedOutputPath 'ScrappedDeviceResults.csv')
+    $scrappedReportWritten = $true
 
     Show-CleanupSummary -EvaluatedDevices $allEvaluatedDevices -CutoffDateUtc $cutoffDateUtc -DaysInactive $DaysInactive `
         -OutputPath $resolvedOutputPath -TenantId $connectedContext.TenantId -Mode $Mode `
@@ -437,11 +545,13 @@ try {
             -ConfirmDeletion:$confirmationGranted -BatchSize $BatchSize -JournalPath $journalPath -LogPath $logPath `
             -OperationLabels (Get-DeviceDeletionLogLabel -Records $allEvaluatedDevices) `
             -WhatIf:$WhatIfPreference -Confirm:$false -VerifyDeletion:$VerifyDeletion)
+        $cleanupReportsWritten = $false
         Set-DeviceDeletionResults -Workflow Stale -Records $allEvaluatedDevices -Results $results
         $deletionErrors = @($results | Where-Object { $_.Status -in 'RemovalFailed', 'OutcomeUnknown', 'BlockedDependency' }).Count
 
         # Re-write reports so DeletedDevices.csv and status columns reflect the outcome.
         Export-CleanupReports -AllEvaluatedDevices $allEvaluatedDevices -OutputPath $resolvedOutputPath
+        $cleanupReportsWritten = $true
 
         if ($deletionErrors -gt 0 -and $exitCode -eq 0) { $exitCode = 6 }
     }
@@ -465,15 +575,23 @@ try {
         if ($scrappedWorkflow) { $records = @($scrappedDeviceRecords) }
         else { $records = @($allEvaluatedDevices) }
         $results = @($journal.Results)
+        if ($scrappedWorkflow) { $scrappedReportWritten = $false }
+        else { $cleanupReportsWritten = $false }
         Set-DeviceDeletionResults -Workflow $deletionPlan.Workflow -Records $records -Results $results
     }
-    Export-CleanupReports -AllEvaluatedDevices $allEvaluatedDevices -OutputPath $resolvedOutputPath
-    Set-ScrappedDeviceOutcomes -Records $scrappedDeviceRecords
+    if (-not $cleanupReportsWritten) {
+        Export-CleanupReports -AllEvaluatedDevices $allEvaluatedDevices -OutputPath $resolvedOutputPath
+        $cleanupReportsWritten = $true
+    }
+    if (-not $scrappedReportWritten) {
+        Set-ScrappedDeviceOutcomes -Records $scrappedDeviceRecords
+        Export-ReportCsv -InputObject $scrappedDeviceRecords -Path (Join-Path $resolvedOutputPath 'ScrappedDeviceResults.csv')
+        $scrappedReportWritten = $true
+    }
     if ($scrappedWorkflow -and $confirmationGranted -and -not $WhatIfPreference -and $exitCode -eq 0 -and
         @($scrappedDeviceRecords | Where-Object { $_.MatchStatus -eq 'Matched' -and $_.CleanupOutcome -ne 'Complete' }).Count) {
         $exitCode = 6
     }
-    Export-ReportCsv -InputObject $scrappedDeviceRecords -Path (Join-Path $resolvedOutputPath 'ScrappedDeviceResults.csv')
     $actionSourceRecords = if ($scrappedWorkflow) { @($scrappedDeviceRecords) } else { @($allEvaluatedDevices) }
     $actionRecords = @(Get-CleanupActionRecords -Plan $deletionPlan -Results $results -Records $actionSourceRecords)
     $summaryParameters = if ($scrappedWorkflow) { @{ ScrappedDevices = $true } } else { @{ CutoffDateUtc = $cutoffDateUtc; DaysInactive = $DaysInactive } }
@@ -482,6 +600,11 @@ try {
         -ScrappedDeviceRecords $scrappedDeviceRecords -AllowOnPremisesSyncedDeletion ([bool]$AllowOnPremisesSyncedDeletion) `
         -ConfirmationGranted $confirmationGranted -DiscoveryComplete $discoveryComplete -ExitCode $exitCode -ActionRecords $actionRecords `
         -TenantId $(if ($connectedContext) { $connectedContext.TenantId } else { $TenantId }) -RunErrorCount $runErrorCount
+
+    if ($resumeWorkflow -and $resumeSource) {
+        $runSummary | Add-Member -NotePropertyName SourceRunId -NotePropertyValue $resumeSource.Plan.RunId
+        $runSummary | Add-Member -NotePropertyName SourcePlanHash -NotePropertyValue $resumeSource.Plan.Hash
+    }
 
     Complete-ProjectExecution -RunSummary $runSummary -OutputPath $resolvedOutputPath -LogPath $logPath -ActionRecords $actionRecords
 }

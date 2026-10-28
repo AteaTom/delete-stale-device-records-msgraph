@@ -74,7 +74,8 @@ when this occurs.
 
 Autopilot-backed objects are protected from ordinary stale cleanup. Explicit
 `-ScrappedDevices` cleanup permits safely correlated Entra deletion only after
-all dependencies succeed and related Autopilot absence is verified. Do not
+all dependencies succeed: Autopilot HTTP 204 is accepted, while unexpected
+HTTP 200 requires verified absence. Do not
 delete Entra manually merely because deregistration was accepted.
 
 For `ScrappedDeviceResults.csv`, `RemovalSubmitted` means the v1.0 Autopilot
@@ -95,7 +96,68 @@ If an Autopilot DELETE subrequest returns HTTP 200 instead of the documented
 checks that exact Autopilot identity: `VerifiedAbsent` means the read-back
 returned 404 and the Entra dependency may continue; a visible identity or
 failed read-back leaves the outcome unresolved and blocks dependent Entra
-deletion. Review the journal and exact-ID results read-only before any new run.
+deletion. The immediate check uses up to three GETs with five-second intervals;
+there is no additional sweep or automatic DELETE replay.
+
+If Autopilot disappears later but Entra remains, first preview:
+
+```powershell
+.\src\Invoke-StaleDeviceCleanup.ps1 -ResumeFromRunPath '.\output\<original-run>'
+```
+
+Then use the same source with `-Mode Interactive` for fresh approval. Re-supply
+the original protection options. This uses the approved Entra object IDs even
+when serial discovery no longer finds their links, reloads current inventory,
+and verifies the original Autopilot IDs read-only. Visible/failed read-back,
+current management or re-registration, protection and unresolved prerequisites
+still block deletion. No Intune/Autopilot DELETE is replayed.
+Missing/incomplete/inconsistent source files or a previously uncertain Entra
+DELETE require manual investigation. Keep the original run unchanged.
+
+To avoid entering the source path, use `-ResumeLatest` instead of
+`-ResumeFromRunPath`. It searches immediate subfolders of `-OutputPath`
+(default `.\output`) and logs/displays its selection. Invalid journals are
+warned about and skipped; no eligible journal is an error, not permission to
+start another cleanup workflow. If multiple tenants have eligible journals,
+specify `-TenantId`. Use an explicit source path when latest timestamps tie
+or you intend to resume a different original run.
+
+### Resume selects no journal, an older journal, or the same journal again
+
+Audit runs have no deletion journal. Latest selection also ignores Entra-only
+resume runs and sources without qualifying unattempted/blocked Entra targets.
+It uses original plan creation time, not directory name, modification time,
+or the most recent arbitrary execution. Invalid/incomplete sources are skipped
+with `ResumeSourceSkipped` warnings; review those warnings rather than deleting
+or editing evidence to make a source eligible.
+
+`-OutputPath` is the immediate-folder search root and new report destination.
+It is not a recursive search. For example, runs under `.\output\retirement`
+require that exact root. Relative paths start at the current working directory.
+Use `-ResumeFromRunPath` if the intended source is outside the root.
+
+The original journal is immutable and is not updated by later resume runs.
+It may therefore remain the latest source after successful resumption.
+Fresh inventory marks now-absent Entra targets `NotFound`/`EntraAlreadyAbsent`
+and does not delete them again. Selection does not automatically advance
+through or combine older runs. Choose an older source explicitly when needed.
+Before approving, check the displayed source path, tenant and new target IDs.
+
+### Resume excludes an expected Entra target
+
+See `AmbiguityReason` and source-linkage columns in
+`ScrappedDeviceResults.csv`, plus `ResumeTarget` and
+`ResumeAutopilotVerification` in the new log. A serial still present anywhere
+in Intune/Autopilot blocks resumption even if its device references changed.
+`AutopilotAbsenceNotVerified` covers both still-visible identities and read
+errors: HTTP 403, timeout or other failed reads are not absence.
+
+Do not remove protections or repeat earlier DELETEs to force eligibility.
+Re-supply protection options, verify the original object/device IDs, and
+investigate re-registration, sync, unsupported platforms and unresolved
+Intune prerequisites. Previously attempted Entra DELETEs are deliberately
+excluded from automatic recovery. A newly generated plan does not make an
+uncertain historical operation safe to replay.
 
 ## RunSummary planned and completed removal counts differ
 
@@ -150,7 +212,9 @@ object. Entra serial correlation depends on current Intune/Autopilot
 references. Once those source records are gone, an Entra object may remain
 but can no longer be identified by serial. Preserve earlier result reports;
 NotFound does not establish complete historical cleanup. Historical reports
-are not automatically replayed as deletion input.
+are not automatically replayed as deletion input. Use the explicit resume
+workflow with the original plan, final journal and report when applicable;
+it requires fresh validation and approval, not just a CSV.
 
 ## Scrapped-device Intune removal fails with a permission error
 

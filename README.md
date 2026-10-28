@@ -37,7 +37,10 @@ deleting anything.
   each unique Autopilot identity through the supported identity DELETE, and
   removes safely correlated Entra objects once Autopilot accepts each DELETE.
   Failed or declined Intune removal blocks related Autopilot deregistration.
-  Autopilot read-back is not required before Entra removal.
+  HTTP 204 permits continuation without read-back; unexpected HTTP 200
+  requires exact-ID read-back returning 404 before Entra removal.
+- Journal-based resumption creates a new Entra-only plan from original
+  approved IDs; it never replays Intune or Autopilot DELETE requests.
 - Incomplete discovery (a failed Graph call for an entire data set) blocks
   all deletion for the run.
 - **Intune managed-device records are never deleted** by the activity-based
@@ -96,10 +99,118 @@ Once Graph accepts the Autopilot DELETE (HTTP 204), explicit scrapped cleanup
 continues to remove safely correlated Entra objects without waiting for a
 read-back check. Optional `-VerifyDeletion` performs bounded post-operation
 read-back and does not gate dependent Entra removals.
+An unexpected Autopilot HTTP 200 instead requires confirmed absence using up
+to three immediate exact-ID GETs with five-second intervals. Unresolved
+identities continue to block related Entra removal. There is no additional
+verification sweep or automatic DELETE replay.
 This is an intentional hardware-retirement exception to Microsoft's advice
 against routine manual Entra deletion after deregistration:
 [deregistration guidance](https://learn.microsoft.com/autopilot/registration-overview#deregister-a-device). See
 [docs/Architecture.md](docs/Architecture.md).
+
+### Resume Entra cleanup after delayed Autopilot removal
+
+Use `-ResumeLatest` to locate the latest valid scrapped journal automatically
+under `-OutputPath` (default `.\output`):
+
+```powershell
+# Read-only preview using the automatically selected original run.
+.\src\Invoke-StaleDeviceCleanup.ps1 -ResumeLatest
+
+# Select the source automatically, then request fresh approval.
+.\src\Invoke-StaleDeviceCleanup.ps1 -ResumeLatest -Mode Interactive
+```
+
+Only immediate run subfolders are searched. Selection uses the approved plan
+creation time, not folder modification time. Runs without journals, completed
+targets and Entra-only resume runs are skipped; invalid/incomplete journals
+are skipped with a warning. A source must have unattempted/blocked Entra
+targets with original Autopilot dependencies. The selected path is displayed
+and logged. If eligible journals span tenants, specify `-TenantId`; tied latest
+timestamps require `-ResumeFromRunPath`. No eligible source means an explicit
+error before Graph connection, never a fallback to normal stale cleanup.
+Selection only locates a source; current inventory and all resume safety
+checks below still apply. It does not merge multiple original runs.
+
+When Autopilot disappears later, retain the original run folder and use its
+approved object IDs rather than trying to rediscover links by serial number:
+
+```powershell
+# Read-only preview; creates new reports and a new Entra-only plan.
+.\src\Invoke-StaleDeviceCleanup.ps1 -ResumeFromRunPath '.\output\20261028-104650'
+
+# Rechecks the original run and asks for fresh approval before Entra deletion.
+.\src\Invoke-StaleDeviceCleanup.ps1 -ResumeFromRunPath '.\output\20261028-104650' -Mode Interactive
+```
+
+Resume requires the original `DeletionPlan.json`, a completed
+`DeletionJournal.jsonl`, and `ScrappedDeviceResults.csv` to agree. It verifies
+the same tenant, reloads current inventories, reapplies protection, and checks
+each original Autopilot ID once read-only. Only a 404 allows an otherwise
+eligible Entra target into the new plan. Current management/re-registration,
+ambiguous or changed identifiers, and unresolved Intune prerequisites block it.
+Autopilot and Intune DELETE requests are never replayed. A previously attempted
+Entra DELETE with an uncertain result is not resumed automatically.
+
+Pass the original protection CSVs/name patterns and any intended AD-sync
+override again: prior command-line protection settings are not stored or
+inherited. The original source files are never modified. Always point at the
+original scrapped run, not the new Entra-only preview/run. Resume is explicit
+hardware retirement, not inactivity classification; `-DaysInactive` and
+`-ScrappedDevices` cannot be combined with either resume selector.
+`-ResumeLatest` and `-ResumeFromRunPath` are also mutually exclusive.
+
+### Choosing a workflow
+
+| Intent | Selector | Possible DELETE targets |
+| --- | --- | --- |
+| Find inactive devices | `-DaysInactive 1200` (or omit for 180) | Eligible standalone Entra objects |
+| Retire reviewed physical hardware | `-ScrappedDevices` and serial CSV | Intune, Windows Autopilot, safely correlated Entra |
+| Finish a known scrapped run | `-ResumeFromRunPath '<original run>'` | Remaining eligible Windows Entra objects only |
+| Find the latest resumable scrapped run | `-ResumeLatest` | Same as explicit resume; one original run |
+
+All selectors default to Audit. Resume never runs implicitly during ordinary
+inactivity or scrapped cleanup, never applies an inactivity threshold, and
+does not poll until deregistration finishes.
+
+For the inactivity-to-retirement workflow: run inactivity Audit/Interactive,
+review `AutopilotProtectedDevices.csv`, and place only explicitly retired
+hardware serials in the scrapped input. Run scrapped Audit, then approved
+scrapped cleanup. If delayed Autopilot removal blocks Entra, use resume Audit
+later, review the selected source and new targets, then approve resume
+separately. An old inactivity value such as 1200 days is not a resume filter.
+
+```powershell
+# Custom search/output root, explicit tenant, and freshly supplied protection.
+.\src\Invoke-StaleDeviceCleanup.ps1 -ResumeLatest -Mode Audit `
+    -OutputPath '.\output\retirement' -TenantId '<tenant-guid>' `
+    -ProtectedDeviceIdFile '.\config\ProtectedDevices.csv' `
+    -ProtectedDeviceNamePattern 'PAW-*','BREAKGLASS-*'
+
+# Simulate the same workflow without tenant DELETE requests.
+.\src\Invoke-StaleDeviceCleanup.ps1 -ResumeLatest -Mode Automatic `
+    -ConfirmDeletion -WhatIf -OutputPath '.\output\retirement' `
+    -TenantId '<tenant-guid>' -ProtectedDeviceIdFile '.\config\ProtectedDevices.csv' `
+    -ProtectedDeviceNamePattern 'PAW-*','BREAKGLASS-*'
+```
+
+Paths are relative to the current working directory unless absolute.
+`-OutputPath` is both the search root for `-ResumeLatest` and the destination
+for new run folders; explicit resume can read a different source folder.
+Each invocation reselects/rechecks independently. Use `-ResumeFromRunPath`
+to pin the reviewed source if newer runs could appear before approval.
+Without `-WhatIf`, Automatic plus `-ConfirmDeletion` performs real Entra
+deletion with no prompt.
+
+Parameter descriptions and runnable examples are also available locally:
+
+```powershell
+Get-Help .\src\Invoke-StaleDeviceCleanup.ps1 -Full
+Import-Module .\src\StaleDeviceCleanup.psd1 -Force
+Get-Help Get-LatestDeviceCleanupResumeSource -Full
+Get-Help Read-DeviceCleanupResumeSource -Full
+Get-Help Resolve-DeviceCleanupResumeRecords -Full
+```
 
 ## Prerequisites
 
@@ -157,7 +268,7 @@ are configured. `ShouldProcess`/`-WhatIf`/`-Confirm` are still honored.
 
 ## Reports
 
-Each run creates `output\<yyyyMMdd-HHmmss>\` containing
+Each run creates `output\<yyyyMMdd-HHmmss>\` (with a run-ID suffix on collision) containing
 `DeletionCandidates.csv`, `DeletedDevices.csv`, `UnknownDevices.csv`,
 `AmbiguousMatches.csv`, `ExcludedDevices.csv`, `ADSyncedDevices.csv`,
 `AutopilotProtectedDevices.csv`, `ErrorDevices.csv`, `ActionResults.csv`,
@@ -259,7 +370,7 @@ records, and it only ever acts on the serial numbers you explicitly listed.
 It follows Microsoft's deregistration order by removing unique Intune records
 first and then submitting each unique Autopilot identity through the supported
 identity DELETE only if required Intune removals succeeded. A failed or skipped
-prerequisite blocks dependent operations. Accepted Autopilot deletion is
+prerequisite blocks dependent operations. HTTP 204 accepted Autopilot deletion is
 reported as `RemovalSubmitted`; the successful Graph DELETE response is
 sufficient to proceed with corresponding Entra
 deletion. `-VerifyDeletion` optionally performs exact-ID read-back
@@ -286,8 +397,10 @@ headerless input format:
 This compatibility option changes parsing only; confirmed runs use the new
 all-service policy. Input serials cannot rediscover Entra records after both
 Intune and Autopilot correlation evidence is gone. `NotFound` is not proof that
-the Entra object is absent; preserve earlier reports for manual reconciliation.
-No historical report is automatically replayed or used as deletion authority.
+the Entra object is absent. Preserve the original plan, final journal and
+report for [journal-based resumption](#resume-entra-cleanup-after-delayed-autopilot-removal).
+Historical targets are never replayed with their old approval: explicit resume
+validates them and creates a fresh Entra-only plan requiring new approval.
 
 Microsoft reference: [Windows Autopilot deregistration guidance](https://learn.microsoft.com/autopilot/registration-overview#deregister-a-device)
 
@@ -319,7 +432,7 @@ See [docs/Troubleshooting.md](docs/Troubleshooting.md).
 | 0 | Completed successfully |
 | 1 | Completed with per-device errors |
 | 2 | Validation or configuration failure (e.g. Automatic mode without `-ConfirmDeletion`) |
-| 3 | Authentication or authorization failure |
+| 3 | Unhandled run error, including authentication, invalid resume source or no eligible latest journal |
 | 4 | Incomplete discovery; deletion blocked |
 | 5 | Administrator cancelled (Interactive mode) |
 | 6 | Destructive operation failed |
@@ -329,7 +442,18 @@ See [docs/Troubleshooting.md](docs/Troubleshooting.md).
 - Autopilot `lastContactedDateTime` is collected for reporting only and is
   not currently used as an authoritative activity source.
 - National/sovereign cloud environments have not been validated.
-- Intune managed-device deletion is intentionally not implemented in v1.
+- Intune managed-device deletion is available only in explicit scrapped
+  cleanup; inactivity cleanup and resume never delete Intune records.
+- Resume requires a consistent original scrapped plan, final journal and
+  report. Audit-only, incomplete and Entra-only runs cannot supply the needed
+  original Autopilot submission evidence.
+- Latest-source selection uses original journals, not a cross-run completion
+  ledger. The same source can be selected again after a later resume; fresh
+  inventory prevents adding Entra objects already absent. Older original
+  runs are not merged or automatically advanced through.
+- Resume does not retry uncertain prior Entra DELETEs, retry failed Intune
+  deletion, or restore missing correlation evidence by name. Such cases
+  require manual investigation. No live behavior is guaranteed by offline tests.
 
 ## Testing
 
@@ -340,10 +464,19 @@ Invoke-Pester -Path .\tests
 
 No test connects to a real tenant or performs a real deletion; all Graph
 cmdlets are mocked.
+`tests\Resume.Tests.ps1` covers source integrity, automatic selection,
+tenant/timestamp ambiguity, current management/protection, exact-ID read-back,
+fresh approval, Audit/WhatIf and Entra-only execution.
+Use `-PassThru` and check `FailedCount` when a shell exit code is needed:
+
+```powershell
+$result = Invoke-Pester -Path '.\tests' -Output Detailed -PassThru
+if ($result.FailedCount -gt 0) { throw 'Offline Pester suite failed.' }
+```
 
 ## PSScriptAnalyzer
 
 ```powershell
 Install-Module -Name PSScriptAnalyzer -Force -SkipPublisherCheck
-Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\PSScriptAnalyzerSettings.psd1
+Invoke-ScriptAnalyzer -Path '.\src' -Recurse -Settings '.\PSScriptAnalyzerSettings.psd1'
 ```

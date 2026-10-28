@@ -15,8 +15,12 @@ position. Outer HTTP 200 is not proof of successful removal.
 | `Set-DeviceDeletionResults` | Fans unique-operation results back into report rows without performing Graph calls. |
 | `Test-DeviceDeletionOutcome` | Bounded read-only verification of an exact identity in the approved tenant. |
 | `Assert-DeviceCleanupContext` | Validates tenant, delegated authentication, public-cloud environment and required scopes. |
+| `Get-LatestDeviceCleanupResumeSource` | Selects one validated local original run by plan creation time; returns `Path`, `Source` and `Created`. |
+| `Read-DeviceCleanupResumeSource` | Reads the original plan, final journal and report; returns validated `Plan`, `Results`, `Records` and `Operations` indexes. |
+| `Resolve-DeviceCleanupResumeRecords` | Rechecks current inventory/protection and original Autopilot IDs read-only; returns report rows for a new Entra-only plan. |
 
-The module includes `src\DeviceDeletionBatch.ps1`; import the module manifest,
+The module includes `src\DeviceDeletionBatch.ps1` and
+`src\DeviceCleanupResume.ps1`; import the module manifest,
 not this implementation file directly. The planner is not a CSV classification
 replacement. Only the existing classification/resolution pipeline should
 supply its input. Low-level function callers must explicitly validate their
@@ -30,8 +34,9 @@ cleanup plans Intune removal, Windows Autopilot identity removal, then eligible
 Entra removal.
 All required Intune operations for the serial must succeed before Autopilot.
 Entra prerequisites include required Intune removals and accepted Autopilot
-DELETE responses for all associated identities. Read-back does not run between
-the Autopilot and Entra phases. Optional `-VerifyDeletion` runs after all
+DELETE responses for all associated identities. HTTP 204 permits continuation
+without read-back; HTTP 200 requires immediate verified absence as described
+below. Optional `-VerifyDeletion` runs after all
 planned DELETE operations and records absence separately from API acceptance;
 it does not gate dependent Entra targets. No arbitrary batch
 `dependsOn` graph is constructed and no serial-based `deleteDevices` action
@@ -72,10 +77,57 @@ than claiming immediate disappearance. An Autopilot HTTP 200 is not accepted
 as DELETE success: the executor immediately reads the exact identity ID.
 `VerifiedAbsent` is recorded, and dependent Entra removal may proceed, only
 when that read returns 404. If the identity remains visible or read-back
-fails, its outcome remains unresolved and dependent Entra removal is blocked.
+fails, its outcome remains unresolved. These immediate checks use up to three
+exact-ID GETs with five-second intervals, without `-VerifyDeletion`. There is
+no second verification sweep during the run.
 The executor never retries that DELETE automatically. Entra 404 is
 `AlreadyAbsent`, not “deleted by this run.” Intune/Autopilot 404 is not
 silently accepted.
+
+### Journal-based Entra resumption
+
+`-ResumeLatest` finds a source in immediate subfolders of `-OutputPath`.
+It selects the latest approved plan creation time among validated scrapped
+journals with unattempted/blocked Entra targets and Autopilot dependencies.
+Runs without journals or pending targets, and Entra-only resume runs, are
+ignored. Invalid/incomplete sources produce `ResumeSourceSkipped` warnings.
+`ResumeSourceSelected` records the selected path, original run ID and hash.
+Multiple eligible tenants require `-TenantId`; an equal latest timestamp
+requires explicit `-ResumeFromRunPath`. No matching source blocks the run
+before Graph connection. Selection does not merge runs or grant approval.
+
+`-ResumeFromRunPath <original scrapped run folder>` validates the approved
+plan hash, matching final journal and original report targets/dependencies.
+An incomplete journal or inconsistent source is rejected. The old approval
+is evidence of the original target set, not permission to replay or bypass
+the normal plan-age limit.
+
+Only previously unattempted/blocked Entra operations with original Autopilot
+dependencies are considered. Successful original Intune prerequisites are
+required. Original Autopilot DELETE attempts must have returned 200/204.
+Fresh inventory and explicit protections are checked, including original
+serials still present anywhere in Intune/Autopilot inventory. Each original
+Autopilot ID must return 404 from one read-only GET. Changed/ambiguous Entra
+IDs, unsupported platforms, AD-sync protection, current management and read
+errors exclude the target. An uncertain prior Entra DELETE is never replayed.
+
+Eligible IDs form a new Entra-only plan with a fresh timestamp/hash and the
+existing confirmation/WhatIf/tenant checks. No Intune or Autopilot DELETE is
+submitted. Audit remains default; Audit and WhatIf can read Graph but cannot
+delete. New reports/journal are separate; the source files remain unchanged.
+Re-supply protection options because prior command-line settings are not
+stored. Use the original scrapped run as source, not a subsequent Entra-only
+run. Original source age does not renew or reuse approval: the new Entra-only
+plan is subject to the same 30-minute limit. Resume does not use inactivity
+classification or accept `-DaysInactive`, `-ScrappedDevices` or its CSV options.
+
+Automatic source selection does not reconcile later runs back into the
+original journal. The same source can be selected again even after successful
+resumption; absent Entra objects are then reported without new DELETE targets.
+It does not automatically move on to another original run. Review the selected
+source each time or pin it with `-ResumeFromRunPath`.
+
+### Transient subrequest handling
 
 Only 429/503/504 subrequests enter the bounded retry queue (default five
 attempts and 300 seconds of elapsed/backoff budget per chunk). Honor

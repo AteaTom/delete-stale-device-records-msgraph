@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Avoid repeatedly removing the front of batch queues; iterate with an offset.
+  Index action-report rows by resource/object ID and reuse case-insensitive
+  protection lookups without changing wildcard/ambiguity behavior. Avoid
+  unchanged Audit report exports during finalization.
 - Index scrapped-device stable references and group deletion-plan rows by serial
   once instead of rescanning full inventories for every input. Preserve
   duplicate/conflicting records and existing dependency rules. Log resolution
@@ -29,6 +33,21 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Explicit journal-based Entra-only resumption via `-ResumeFromRunPath`.
+  Validate original scrapped plan/hash, final journal and report; reload
+  current inventory/protection and require exact-ID Autopilot 404 read-back.
+  Generate a fresh plan requiring new approval, never replay Intune/Autopilot
+  DELETEs or uncertain previously attempted Entra operations.
+- `-ResumeLatest` local source selection under immediate `-OutputPath`
+  subfolders, ordered by original plan creation time. Warn/skip invalid
+  sources; require explicit selection for tenant/timestamp ambiguity. No
+  fallback to inactivity cleanup when no eligible journal exists.
+- Resume source-linkage report/summary fields and source-selection,
+  per-target and exact-ID verification log events. Original artifacts remain
+  unchanged; prior protection command-line options must be supplied again.
+- Offline resumption regressions for artifact integrity, tenant isolation,
+  automatic selection, re-registration/protection, approval, Audit/WhatIf,
+  Entra-only execution and output-folder collisions. No live tenant validation.
 - `ActionResults.csv` with unique planned operation outcomes and additive JSON
   reason/resource/status counts, including run-level errors.
 - Offline regressions for report partitioning, overlapping protections,
@@ -37,6 +56,11 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Separate the script's comment-based help from its `#Requires` directive so
+  `Get-Help -Full` renders descriptions and examples, including resume options,
+  rather than syntax alone.
+- Preserve existing run output on timestamp collision by adding a run-ID
+  suffix rather than overwriting evidence.
 - Preserve excluded rows with missing reason evidence in `ExcludedDevices.csv`
   without reporting errors under terminating PowerShell error preferences.
   Summary reason counts label absent or empty reasons as `MissingReasonCode`;

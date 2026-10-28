@@ -19,7 +19,7 @@ by `Export-ReportCsv`). Every row includes the run's `RunId`.
 | `AutopilotProtectedDevices.csv` | Devices excluded with primary reason `AutopilotProtected`, including correlation and AD-sync evidence |
 | `ErrorDevices.csv` | Subset with a non-null `ErrorMessage` |
 | `OnPremisesSyncedReview.csv` | Compatibility alias of `ADSyncedDevices.csv`; deprecated name retained for existing consumers |
-| `ScrappedDeviceResults.csv` | Object-level Intune/Autopilot/Entra targets and outcomes, plus excluded/ambiguous/unmatched or lookup-failed serials; empty outside scrapped cleanup |
+| `ScrappedDeviceResults.csv` | Scrapped targets/outcomes or resume Entra rows with source linkage, plus exclusions and lookup failures; empty for inactivity cleanup |
 | `RunSummary.json` | Machine-readable run outcome (counts, exit code, timestamps) |
 | `ExecutionLog.txt` | Human-readable timestamped INFO/WARNING/ERROR/SUCCESS events and final summary; verbose/debug detail is not written here |
 | `ActionResults.csv` | One final row per unique planned DELETE operation, including unattempted or simulated targets |
@@ -82,8 +82,8 @@ Existing JSON fields keep their meaning.
 When an administrator cancels Interactive confirmation (exit code 5), with no
 attempted deletions or reported errors, the console instead shows
 `Deletion cancelled. No changes were made.` and the report path. This applies
-to both workflows, including `-WhatIf`. The detailed completion block remains
-in `ExecutionLog.txt`, and JSON/CSV reports are still finalized with unattempted
+to inactivity, scrapped and resume runs, including `-WhatIf`. The detailed
+completion block remains in `ExecutionLog.txt`, and JSON/CSV reports are still finalized with unattempted
 actions recorded as `NotAttempted`. Runs with errors retain the detailed console
 summary so cancellation does not hide failures.
 Direct module callers must supply finalized `ActionRecords` to
@@ -98,7 +98,7 @@ not success. Audit/WhatIf actions have zero actual submission attempts.
 `Removed` is distinct from `AlreadyAbsent`/`AlreadyRemoved`,
 `RemovalSubmitted` and `VerifiedAbsent`; accepted Autopilot submission does
 not establish absence. `VerifiedAbsent` means the Autopilot DELETE returned
-an unexpected HTTP 200 and an immediate exact-ID read-back confirmed 404.
+an unexpected HTTP 200 and immediate exact-ID read-back confirmed 404.
 Verification uncertainty remains separate from the DELETE outcome.
 `TotalRunErrors` counts errors reaching the run-level catch, including failures
 before any device can be evaluated; it can overlap device/serial errors and
@@ -158,8 +158,10 @@ Scrapped cleanup shows matched serials separately from serials with actual
 Intune/Autopilot/Entra DELETE targets. Counts of unique objects sum to DELETE
 operations, not physical devices. Required Intune success before Autopilot and
 accepted Autopilot DELETE requests before Entra are displayed explicitly.
-These are alternatives, not combined workflows: `-ScrappedDevices` bypasses
-stale cleanup.
+These are alternatives, not combined workflows: `-ScrappedDevices` and both
+resume selectors bypass stale cleanup. Resume uses the scrapped summary
+layout with zero Intune/Autopilot DELETE targets and displays its original
+source separately.
 
 See `AllEvaluatedDevices.csv` header for the authoritative list; it matches
 the field list documented in the project specification, including
@@ -246,10 +248,28 @@ nonzero; Audit and WhatIf never claim real cleanup.
 `RemovalSubmitted` means the supported Autopilot identity DELETE returned the
 documented HTTP 204. It confirms submission, not immediate disappearance from
 the Autopilot portal; the service completes that work asynchronously.
-`VerifiedAbsent` means an unexpected HTTP 200 was followed by an immediate
-exact-ID GET returning 404. Only this verified absence permits dependent Entra
+`VerifiedAbsent` means an unexpected HTTP 200 was followed by an exact-ID
+GET returning 404 during the immediate bounded checks.
+Only this verified absence permits dependent Entra
 removal for that response. It is counted separately in
 `TotalScrappedAutopilotVerifiedAbsent`.
+
+Resume creates separate `ScrappedDeviceResults.csv` and action/summary reports
+for the new Entra-only plan. Resume rows add `SourceRunId`, `SourcePlanHash`,
+`SourceEntraObjectId`, `SourceAutopilotIdentityIds` and
+`CorrelationMethod=PriorApprovedEntraObjectId`.
+Excluded targets retain their original ID in `SourceEntraObjectId` but do not
+populate a deletion target. `AmbiguityReason` explains protection, management,
+identifier or prerequisite exclusions. `ResumeStarted`/`ResumeTarget` log
+events link the new run to its source; `RunSummary.json` also includes the
+source run ID/hash. `ResumeAutopilotVerification` log events record each
+exact-ID GET outcome; original Autopilot/Intune outcomes remain in the original
+journal and are not counted as new DELETE attempts.
+If a timestamped output folder already exists, a run-ID suffix prevents
+overwriting its reports or execution log.
+Automatic `-ResumeLatest` selection adds `ResumeSourceSelected` with source
+path/run/hash; `ResumeSourceSkipped` warnings explain invalid journal sources.
+Source discovery itself is local and does not submit Graph requests.
 
 For scrapped-device runs, the completion log and `RunSummary.json` count
 Autopilot submissions, read-back-confirmed absent, already-absent and failed
@@ -278,6 +298,43 @@ serials. Blank rows and the required
 header are excluded from the duplicate count.
 `ScrappedDeviceResults.csv` is written first so its object-level rows can be
 reviewed before confirmation.
+
+### Resume report interpretation
+
+Resume reuses `Workflow=Scrapped` in plans/action reports and
+`ScrappedWorkflow=true` in the summary; it does not introduce a `Resume`
+plan-workflow value. `SourceRunId`/`SourcePlanHash` identify its original source
+after source validation succeeds. Standard inactivity reports are empty;
+review `ScrappedDeviceResults.csv` and `ActionResults.csv` instead.
+
+One resume row represents one considered original Entra operation. It retains
+the first associated serial as its display serial; all associated source rows
+are checked for identifiers, serials and protection. Serial-based summary
+counts therefore need not equal object counts. `SourceAutopilotIdentityIds`
+is semicolon-separated evidence, not an Autopilot deletion target.
+Autopilot/Intune target fields are empty; eligible Entra rows use
+`NotApplicable` for their non-target service removal statuses.
+
+| `AmbiguityReason` | Interpretation |
+| --- | --- |
+| `EntraAlreadyAbsent` | Original Entra ID is absent from fresh complete inventory; `MatchStatus=NotFound`, no DELETE |
+| `AmbiguousEntraObjectId` | Multiple current entries for the original object ID |
+| `NoOriginalAutopilotDependency` | Original Entra operation has no Autopilot prerequisite; outside resume scope |
+| `UnsupportedOrMissingPlatform` | Current target is not a Windows client |
+| `ConflictingIdentifiers` | Missing/zero, changed or nonunique Entra device ID, or conflicting saved IDs |
+| `OnPremisesSyncProtected` | Current AD synchronization protection applies |
+| `InvalidSerialNumber` | Original serial is missing or a placeholder |
+| `CurrentManagementOrAmbiguousCorrelation` | Current management correlation exists/is ambiguous, or an original serial remains in Intune/Autopilot |
+| `ProtectedDevice` | Current explicit protection matches |
+| `IntunePrerequisiteUnresolved` | Required original Intune removal has not succeeded |
+| `AutopilotPrerequisiteUnresolved` | Original Autopilot result lacks a qualifying HTTP 200/204 DELETE attempt |
+| `AutopilotAbsenceNotVerified` | Exact-ID Autopilot GET did not establish 404 absence |
+
+These are resume `AmbiguityReason` values, not inactivity `ReasonCode` values.
+Only considered, unattempted/blocked original Entra operations produce rows;
+previously removed, declined, failed or uncertain attempted Entra operations
+are not new resume targets. No rows can also mean no operations are resumable,
+not that the historical run is fully reconciled. Preserve original evidence.
 
 ## Reason codes
 
