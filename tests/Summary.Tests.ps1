@@ -187,6 +187,46 @@ Describe 'Export-CleanupReports' {
     }
 }
 
+Describe 'Get-CleanupActionRecords' {
+    It 'indexes target records while retaining repeated matches and ignoring missing targets' {
+        $plan = [PSCustomObject]@{
+            RunId = 'run1'
+            Workflow = 'Scrapped'
+            Operations = @(
+                [PSCustomObject]@{ Id = 'intune-intune1'; Resource = 'Intune'; ObjectId = 'intune1' },
+                [PSCustomObject]@{ Id = 'entra-entra1'; Resource = 'Entra'; ObjectId = 'entra1' },
+                [PSCustomObject]@{ Id = 'autopilot-missing'; Resource = 'Autopilot'; ObjectId = 'missing' }
+            )
+        }
+        $records = @(
+            [PSCustomObject]@{
+                IntuneManagedDeviceId = 'INTUNE1'; EntraObjectId = 'entra1'; AutopilotIdentityId = $null
+                IntuneDeviceName = 'Device B'; InputSerialNumber = 'serial2'; EntraDeviceId = 'device2'
+            },
+            [PSCustomObject]@{
+                IntuneManagedDeviceId = 'intune1'; EntraObjectId = 'ENTRA1'; AutopilotIdentityId = $null
+                DeviceName = 'Device A'; InputSerialNumber = 'SERIAL1'; EntraDeviceId = 'device1'
+            }
+        )
+        $results = @(
+            [PSCustomObject]@{ Id = 'intune-intune1'; Status = 'Removed'; Attempts = 1; HttpStatus = 204; VerificationStatus = 'NotRequested'; ErrorMessage = '' },
+            [PSCustomObject]@{ Id = 'entra-entra1'; Status = 'AlreadyAbsent'; Attempts = 0; HttpStatus = 404; VerificationStatus = 'NotRequested'; ErrorMessage = '' }
+        )
+
+        $actions = @(Get-CleanupActionRecords -Plan $plan -Results $results -Records $records)
+
+        $actions.Count | Should -Be 3
+        $intuneAction = $actions | Where-Object OperationId -eq 'intune-intune1'
+        $intuneAction.DeviceName | Should -Be 'Device A; Device B'
+        $intuneAction.SerialNumber | Should -Be 'SERIAL1; serial2'
+        $intuneAction.EntraDeviceId | Should -Be 'device2; device1'
+        ($actions | Where-Object OperationId -eq 'entra-entra1').Outcome | Should -Be 'AlreadyAbsent'
+        $missingAction = $actions | Where-Object OperationId -eq 'autopilot-missing'
+        $missingAction.Outcome | Should -Be 'NotAttempted'
+        $missingAction.DeviceName | Should -BeNullOrEmpty
+    }
+}
+
 Describe 'New-RunSummary' {
     It 'produces the expected count fields' {
         $devices = @(

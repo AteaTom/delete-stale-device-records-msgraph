@@ -117,6 +117,26 @@ Describe 'Guarded JSON batch deletion' {
         }
     }
 
+    It 'preserves operation order across multiple batches' {
+        $script:invoke.Plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Stale -Records (New-BatchTestRecords -Count 23)
+        $script:invoke.ApprovalHash = $script:invoke.Plan.Hash
+        $script:invoke.BatchSize = 7
+        $script:submittedIds = [System.Collections.Generic.List[string]]::new()
+        Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup {
+            $requests = @((ConvertFrom-Json $Body).requests)
+            foreach ($request in $requests) { $script:submittedIds.Add([string]$request.id) }
+            [PSCustomObject]@{ responses = @($requests | ForEach-Object {
+                [PSCustomObject]@{ id = $_.id; status = 204 }
+            }) }
+        }
+
+        $results = @(Invoke-DeviceDeletionPlan @script:invoke)
+
+        $script:submittedIds.ToArray() | Should -Be @($script:invoke.Plan.Operations | ForEach-Object Id)
+        @($results | Where-Object Status -ne 'Removed').Count | Should -Be 0
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 4 -Exactly
+    }
+
     It 'rejects a batch size outside the Graph contract' {
         { Invoke-DeviceDeletionPlan @script:invoke -BatchSize 21 } | Should -Throw
         Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0

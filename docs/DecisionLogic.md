@@ -114,8 +114,11 @@ After confirmation, the scrapped-device operation follows this order:
 2. Submit every unique Autopilot identity once through the supported identity
    DELETE endpoint. Failed or declined required Intune removals block
    Autopilot for the serial.
-3. Treat a successful Autopilot DELETE response as accepted; it is sufficient
-   to proceed without waiting for portal or API read-back visibility.
+3. Treat documented HTTP 204 as accepted, sufficient to proceed without
+   waiting for portal or API read-back visibility. Unexpected HTTP 200 is
+   not success: up to three exact-ID GETs, five seconds apart, must establish
+   404 absence. Visible/error outcomes block related Entra targets; there is
+   no second sweep or automatic DELETE replay.
 4. Remove every safely correlated eligible Entra target. Intune or Autopilot
    prerequisite failure blocks related Entra; independent targets continue.
    WhatIf simulates this dependency transition without making DELETE calls.
@@ -133,6 +136,53 @@ Without either Intune or Autopilot evidence a serial cannot identify an Entra
 object. NotFound therefore means no reliable match in current discovery, not
 proof of complete historical cleanup. Preserve original reports for manual
 reconciliation; no historical report is implicitly replayed.
+
+## Journal-based Entra resumption
+
+`-ResumeFromRunPath` or `-ResumeLatest` explicitly selects retirement
+continuation, not inactivity evaluation. The inactivity threshold is not
+reapplied, and no new hardware is selected from a serial CSV.
+
+Source validation requires `Workflow=Scrapped`, the original plan content
+hash, matching run/tenant/hash in the last journal entry with `Event=Final`,
+complete unique per-operation results, and report rows that reconstruct the
+same operations/dependencies. A final checkpoint means execution ended with
+recorded outcomes, not that every removal succeeded. An old original plan
+can supply evidence; only the newly created plan receives fresh approval and
+the normal execution-age limit.
+
+Only Entra operations with zero previous attempts and status
+`BlockedDependency` or `NotAttempted` are considered. For a present target:
+
+1. The original Entra object ID must identify exactly one current Windows
+   client. Its nonzero device ID must be unique and match all saved rows.
+2. Current Intune/Autopilot correlation must be unmatched. Each original
+   serial must be valid and absent from both current management inventories;
+   this blocks re-registration even when references changed.
+3. Current explicit ID/serial/name protection and default AD-sync protection
+   apply. Supply protection options and any intended sync override again;
+   they are not inherited from the earlier command.
+4. An original Autopilot dependency is required. Every required Intune
+   result must already be successful/already absent. Every original Autopilot
+   dependency must have a recorded DELETE attempt with HTTP 200/204.
+5. Exact-ID read-only verification of each original Autopilot dependency
+   must return 404. A visible object, permission error or failed read does
+   not establish absence. Shared dependency checks are cached for this run.
+
+An eligible row is `Matched` and contributes only an Entra target to the new
+plan. An absent Entra object is `NotFound` with `EntraAlreadyAbsent`, no
+DELETE target and no claim that this run removed it. Other rejected targets
+are `Excluded`. Previously attempted Entra operations, including unknown
+outcomes, are not automatically resumed. No Intune/Autopilot DELETE is replayed.
+These checks use current inventory, not an atomic pre-delete guarantee.
+
+`-ResumeLatest` first searches immediate `-OutputPath` subfolders locally.
+Among validated sources with qualifying Entra operations and Autopilot
+dependencies, it picks the newest plan creation time. No journal/no qualifying
+targets means skip; invalid sources warn and skip. Multiple eligible tenants
+require `-TenantId`, and a tied latest timestamp requires an explicit path.
+This is source selection, not proof that its targets will pass the checks
+above. It neither merges original runs nor falls back to inactivity cleanup.
 
 ## Decision precedence (evaluated in order per device)
 

@@ -29,6 +29,10 @@ Entra deletion. No consent or tenant authorization was validated by offline test
 | Audit | `Device.Read.All`, `DeviceManagementManagedDevices.Read.All`, `DeviceManagementServiceConfig.Read.All` |
 | Interactive / Automatic | All read scopes above, plus `Directory.AccessAsUser.All` |
 | Interactive / Automatic with `-ScrappedDevices` | All read scopes above, plus `DeviceManagementManagedDevices.ReadWrite.All`, `DeviceManagementServiceConfig.ReadWrite.All` and `Directory.AccessAsUser.All` |
+| Interactive / Automatic with `-ResumeFromRunPath` | All read scopes above, plus `Directory.AccessAsUser.All`; no Intune/Autopilot write scopes requested |
+
+`-ResumeLatest` selects the source locally and uses exactly the same scopes
+and approval requirements as `-ResumeFromRunPath`.
 
 `Test-GraphPermissions` compares the scopes actually granted to the signed-in
 session (`(Get-MgContext).Scopes`) against the scopes required for the
@@ -73,6 +77,19 @@ before use in those environments.
   any serial number not present in that file.
 - iOS and Android devices are never looked up in, or deleted from, Windows
   Autopilot.
+- `-ResumeFromRunPath` can remove remaining approved Windows Entra objects
+  from an original scrapped run after read-only Autopilot absence checks and
+  fresh approval. It never submits Intune or Autopilot DELETE requests.
+  `-ResumeLatest` changes only local source discovery; it has the same scope.
+
+Both resume selectors reload Entra, Intune and Autopilot inventories; they
+therefore still need all three read scopes even though only Entra can be
+deleted. Exact-ID verification is read-only and an HTTP 403 never counts as
+absence. Tenant identity defaults to the validated source tenant; an explicit
+different tenant is rejected. With `-ResumeLatest`, `-TenantId` also filters
+eligible local sources before selection. Existing consented Graph sessions
+may contain more scopes than requested; resume does not use those additional
+write scopes to delete Intune or Autopilot records.
 
 JSON batching uses the same individual v1.0 DELETE permissions. There is no
 batch permission or permission bypass. Each envelope rechecks the approved

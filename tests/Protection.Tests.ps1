@@ -44,6 +44,23 @@ Describe 'Test-DeviceProtection' {
         $result = Test-DeviceProtection -Device $device -ProtectedDeviceNames @('PAW*')
         $result.IsProtected | Should -Be $true
     }
+
+    It 'reuses indexed case-insensitive ID, serial, literal-name, and wildcard lookups' {
+        $index = InModuleScope StaleDeviceCleanup {
+            New-DeviceProtectionIndex -ProtectedEntraObjectIds @('OBJECT-1') `
+                -ProtectedEntraDeviceIds @('DEVICE-1') -ProtectedSerialNumbers @(' Serial123 ') `
+                -ProtectedDeviceNames @('Literal-device', 'CSV-*') -ProtectedNamePatterns @('Explicit-*')
+        }
+
+        (Test-DeviceProtection -Device ([PSCustomObject]@{ Id = 'object-1'; DeviceId = $null; DisplayName = $null }) -ProtectionIndex $index).IsProtected | Should -BeTrue
+        (Test-DeviceProtection -Device ([PSCustomObject]@{ Id = $null; DeviceId = 'device-1'; DisplayName = $null }) -ProtectionIndex $index).IsProtected | Should -BeTrue
+        (Test-DeviceProtection -Device ([PSCustomObject]@{ Id = $null; DeviceId = $null; DisplayName = 'LITERAL-DEVICE' }) -ProtectionIndex $index).Reason |
+            Should -Be 'Device name matches the protected device list.'
+        (Test-DeviceProtection -Device ([PSCustomObject]@{ Id = $null; DeviceId = $null; DisplayName = 'CSV-DEVICE' }) -ProtectionIndex $index).IsProtected | Should -BeTrue
+        (Test-DeviceProtection -Device ([PSCustomObject]@{ Id = $null; DeviceId = $null; DisplayName = 'Explicit-Device' }) -ProtectionIndex $index).IsProtected | Should -BeTrue
+        (Test-DeviceProtection -Device ([PSCustomObject]@{ Id = 'other'; DeviceId = $null; DisplayName = $null }) -IntuneSerialNumber 'serial123' -ProtectionIndex $index).IsProtected |
+            Should -BeTrue
+    }
 }
 
 Describe 'Get-StaleDeviceCandidates protection integration' {

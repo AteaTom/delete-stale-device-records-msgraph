@@ -369,6 +369,16 @@ Describe 'Scrapped script outcomes with entirely offline Graph mocks' {
         if ($Scenario -eq 'WhatIf') { $summary.TotalScrappedSimulated | Should -Be 1 }
     }
 
+    It 'exports the scrapped report only once in Audit mode' {
+        Mock Export-ReportCsv { }
+
+        & $script:entry @script:invoke -Mode Audit
+
+        Should -Invoke Export-ReportCsv -Times 1 -Exactly -ParameterFilter {
+            $Path -like '*ScrappedDeviceResults.csv'
+        }
+    }
+
     It 'continues to Entra after accepted Autopilot removal with <Readback> read-back' -ForEach @(
         @{ Readback = 'OK' }, @{ Readback = 'Forbidden' }
     ) {

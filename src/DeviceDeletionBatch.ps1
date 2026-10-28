@@ -397,9 +397,11 @@ function Invoke-DeviceDeletionPlan {
                     & $writeActionLog $results[$operation.Id]
                 }
             }
-            while ($pending.Count -gt 0) {
-                $chunk = @($pending | Select-Object -First $BatchSize)
-                $pending.RemoveRange(0, $chunk.Count)
+            $pendingOffset = 0
+            while ($pendingOffset -lt $pending.Count) {
+                $chunkCount = [Math]::Min($BatchSize, $pending.Count - $pendingOffset)
+                $chunk = $pending.GetRange($pendingOffset, $chunkCount).ToArray()
+                $pendingOffset += $chunkCount
                 $retry = @($chunk)
                 $timer = [System.Diagnostics.Stopwatch]::StartNew()
                 while ($retry.Count -gt 0) {

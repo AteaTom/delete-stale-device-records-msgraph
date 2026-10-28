@@ -11,6 +11,9 @@
     RequiredModules   = @()
 
     FunctionsToExport = @(
+        'Get-LatestDeviceCleanupResumeSource',
+        'Read-DeviceCleanupResumeSource',
+        'Resolve-DeviceCleanupResumeRecords',
         'Write-CleanupLog',
         'Test-Prerequisites',
         'Connect-DeviceCleanupGraph',

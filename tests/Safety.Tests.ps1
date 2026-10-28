@@ -165,6 +165,18 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
         Assert-MockCalled -CommandName Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 0
     }
 
+    It 'exports stale reports only once in Audit mode' {
+        Mock Export-CleanupReports { }
+        Mock Export-ReportCsv { }
+
+        & $script:scriptPath -Mode Audit -DaysInactive 180 -OutputPath $script:runOutputPath
+
+        Should -Invoke Export-CleanupReports -Times 1 -Exactly
+        Should -Invoke Export-ReportCsv -Times 1 -Exactly -ParameterFilter {
+            $Path -like '*ScrappedDeviceResults.csv'
+        }
+    }
+
     It 'uses batch deletion by default without individual DELETE cmdlets' {
         & $script:scriptPath -Mode Automatic -ConfirmDeletion -OutputPath $script:runOutputPath
         Assert-MockCalled Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1
