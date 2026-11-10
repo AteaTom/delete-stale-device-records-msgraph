@@ -441,13 +441,11 @@ Describe 'Guarded JSON batch deletion' {
         $records[2].EntraObjectId = 'entra2'
         $plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records $records
         ($plan.Operations | Where-Object Id -eq autopilot-ap1).Dependencies | Should -Be @('intune-intune1', 'intune-intune2')
-        ($plan.Operations | Where-Object Id -eq entra-entra1).Dependencies |
-            Should -Be @('autopilot-ap1', 'autopilot-ap2', 'intune-intune1', 'intune-intune2')
-        ($plan.Operations | Where-Object Id -eq entra-entra2).Dependencies | Should -Be @('autopilot-ap3', 'intune-intune3')
+        @($plan.Operations | Where-Object Resource -eq Entra).Count | Should -Be 0
         $records[2].EntraObjectId = 'entra1'
         $sharedPlan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records $records
-        ($sharedPlan.Operations | Where-Object Id -eq entra-entra1).Dependencies |
-            Should -Be @('autopilot-ap1', 'autopilot-ap2', 'autopilot-ap3', 'intune-intune1', 'intune-intune2', 'intune-intune3')
+        @($sharedPlan.Operations | Where-Object Resource -eq Entra).Count | Should -Be 0
+        ($sharedPlan.Operations | Where-Object Id -eq autopilot-ap3).Dependencies | Should -Be @('intune-intune3')
     }
 
     It 'writes intent before making the destructive call' {
@@ -504,8 +502,8 @@ Describe 'Guarded JSON batch deletion' {
         }
         Invoke-DeviceDeletionPlan @script:invoke | Out-Null
         $log = Get-Content $script:logPath -Raw
-        $log | Should -Match '\[WARNING\] Event=ActionResult Progress=1/3 Resource=Intune ObjectId=intune1 DeviceName=LAPTOP-9 Serial=SERIAL1 Outcome=RemovalFailed'
-        $log | Should -Match '\[WARNING\] Event=ActionResult Progress=3/3 Resource=Entra ObjectId=entra1 DeviceName=LAPTOP-9 Serial=SERIAL1 Outcome=BlockedDependency'
+        $log | Should -Match '\[WARNING\] Event=ActionResult Progress=1/2 Resource=Intune ObjectId=intune1 DeviceName=LAPTOP-9 Serial=SERIAL1 Outcome=RemovalFailed'
+        $log | Should -Match '\[WARNING\] Event=ActionResult Progress=2/2 Resource=Autopilot ObjectId=ap1 DeviceName=LAPTOP-9 Serial=SERIAL1 Outcome=BlockedDependency'
     }
 
     It 'does not change the approved plan hash when log labels are supplied' {
@@ -519,33 +517,33 @@ Describe 'Guarded JSON batch deletion' {
         (Invoke-DeviceDeletionPlan @script:invoke).Status | Should -Be 'Removed'
     }
 
-    It 'blocks Autopilot and Entra after a failed Intune prerequisite' {
+    It 'blocks Autopilot after a failed Intune prerequisite and never plans Entra' {
         $script:invoke.Plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records @(New-ScrappedBatchRecord)
         $script:invoke.ApprovalHash = $script:invoke.Plan.Hash
-        @($script:invoke.Plan.Operations | Where-Object Resource -eq 'Entra').Count | Should -Be 1
+        @($script:invoke.Plan.Operations | Where-Object Resource -eq 'Entra').Count | Should -Be 0
         Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup {
             [PSCustomObject]@{ responses = @([PSCustomObject]@{ id = 'intune-intune1'; status = 400 }) }
         }
         $results = @(Invoke-DeviceDeletionPlan @script:invoke)
         ($results | Where-Object Resource -eq 'Autopilot').Status | Should -Be 'BlockedDependency'
-        ($results | Where-Object Resource -eq 'Entra').Status | Should -Be 'BlockedDependency'
+        @($results | Where-Object Resource -eq 'Entra').Count | Should -Be 0
         Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1 -Exactly
     }
 
-    It 'executes all three phases after accepted Autopilot deletion without read-back' {
+    It 'executes only Intune and Autopilot phases without completion polling' {
         $script:invoke.Plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records @(New-ScrappedBatchRecord)
         $script:invoke.ApprovalHash = $script:invoke.Plan.Hash
         $results = @(Invoke-DeviceDeletionPlan @script:invoke)
         ($results | Where-Object Resource -eq 'Intune').Status | Should -Be 'Removed'
         ($results | Where-Object Resource -eq 'Autopilot').Status | Should -Be 'RemovalSubmitted'
-        ($results | Where-Object Resource -eq 'Entra').Status | Should -Be 'Removed'
-        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 3 -Exactly -ParameterFilter { $Method -eq 'POST' }
+        @($results | Where-Object Resource -eq 'Entra').Count | Should -Be 0
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 2 -Exactly -ParameterFilter { $Method -eq 'POST' }
         Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0 -ParameterFilter { $Method -eq 'GET' }
         $script:invoke.JournalPath = Join-Path $TestDrive 'simulation.jsonl'
-        @(Invoke-DeviceDeletionPlan @script:invoke -WhatIf | Where-Object Status -eq 'WhatIf').Count | Should -Be 3
+        @(Invoke-DeviceDeletionPlan @script:invoke -WhatIf | Where-Object Status -eq 'WhatIf').Count | Should -Be 2
     }
 
-    It 'does not let optional Autopilot read-back block Entra deletion' {
+    It 'limits optional read-back to Intune and never verifies Autopilot' {
         $script:invoke.Plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records @(New-ScrappedBatchRecord)
         $script:invoke.ApprovalHash = $script:invoke.Plan.Hash
         Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -ParameterFilter { $Method -eq 'GET' } {
@@ -555,12 +553,35 @@ Describe 'Guarded JSON batch deletion' {
         $results = @(Invoke-DeviceDeletionPlan @script:invoke -VerifyDeletion)
 
         ($results | Where-Object Resource -eq 'Autopilot').Status | Should -Be 'RemovalSubmitted'
-        ($results | Where-Object Resource -eq 'Autopilot').VerificationStatus | Should -Be 'OutcomeUnknown'
-        ($results | Where-Object Resource -eq 'Entra').Status | Should -Be 'Removed'
-        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 3 -Exactly -ParameterFilter { $Method -eq 'GET' }
+        ($results | Where-Object Resource -eq 'Autopilot').VerificationStatus | Should -Be 'NotRequested'
+        @($results | Where-Object Resource -eq 'Entra').Count | Should -Be 0
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1 -Exactly -ParameterFilter { $Method -eq 'GET' }
     }
 
-    It 'requires exact-ID Autopilot absence verification before allowing Entra after HTTP 200' {
+    It 'retains sanitized diagnostic details for an unexpected Autopilot response' {
+        $operation = [PSCustomObject]@{ Id = 'autopilot-ap1'; Resource = 'Autopilot'; ObjectId = 'ap1' }
+        $response = [PSCustomObject]@{
+            responses = @([PSCustomObject]@{
+                id = $operation.Id; status = 200
+                headers = @{ 'request-id' = 'request-123'; 'unrelated-header' = 'DO-NOT-LOG' }
+                body = @{ error = @{ code = 'SyntheticCode'; message = "Synthetic`nmessage password=DO-NOT-LOG" }; unrelated = 'DO-NOT-LOG' }
+            })
+        }
+        $result = & (Get-Module StaleDeviceCleanup) {
+            param($Response, $Operation)
+            ConvertFrom-DeviceDeletionBatchResponse -Response $Response -Operations @($Operation)
+        } $response $operation
+        $result.Status | Should -Be OutcomeUnknown
+        $result.ErrorMessage | Should -Match 'SyntheticCode'
+        $result.ErrorMessage | Should -Match 'RequestId=request-123'
+        $result.ErrorMessage | Should -Not -Match 'DO-NOT-LOG'
+        $result.ErrorMessage | Should -Match '\[REDACTED\]'
+        Write-CleanupLog -Message $result.ErrorMessage -LogPath $script:logPath
+        @(Get-Content $script:logPath).Count | Should -Be 1
+        (Get-Content $script:logPath -Raw) | Should -Match 'Synthetic\\nmessage'
+    }
+
+    It 'keeps HTTP 200 unresolved without polling or deleting Entra' {
         $script:invoke.Plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records @(New-ScrappedBatchRecord)
         $script:invoke.ApprovalHash = $script:invoke.Plan.Hash
         Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -ParameterFilter { $Method -eq 'POST' } {
@@ -574,21 +595,20 @@ Describe 'Guarded JSON batch deletion' {
 
         $results = @(Invoke-DeviceDeletionPlan @script:invoke)
 
-        ($results | Where-Object Resource -eq 'Autopilot').Status | Should -Be 'VerifiedAbsent'
-        ($results | Where-Object Resource -eq 'Autopilot').VerificationStatus | Should -Be 'VerifiedAbsent'
-        ($results | Where-Object Resource -eq 'Entra').Status | Should -Be 'Removed'
-        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1 -Exactly -ParameterFilter {
-            $Method -eq 'GET' -and $Uri -ceq '/v1.0/deviceManagement/windowsAutopilotDeviceIdentities/ap1'
-        }
-        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 3 -Exactly -ParameterFilter { $Method -eq 'POST' }
+        ($results | Where-Object Resource -eq 'Autopilot').Status | Should -Be 'OutcomeUnknown'
+        ($results | Where-Object Resource -eq 'Autopilot').VerificationStatus | Should -Be 'NotRequested'
+        @($results | Where-Object Resource -eq 'Entra').Count | Should -Be 0
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0 -Exactly -ParameterFilter { $Method -eq 'GET' }
+        Should -Invoke Start-Sleep -ModuleName StaleDeviceCleanup -Times 0
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 2 -Exactly -ParameterFilter { $Method -eq 'POST' }
 
         $records = @(New-ScrappedBatchRecord)
         Set-DeviceDeletionResults -Workflow Scrapped -Records $records -Results $results
         Set-ScrappedDeviceOutcomes -Records $records
-        $records[0].CleanupOutcome | Should -Be 'Complete'
+        $records[0].CleanupOutcome | Should -Be 'Partial'
     }
 
-    It 'blocks dependent Entra removal when Autopilot HTTP 200 read-back still finds the identity' {
+    It 'does not read visible Autopilot identities after HTTP 200' {
         $script:invoke.Plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records @(New-ScrappedBatchRecord)
         $script:invoke.ApprovalHash = $script:invoke.Plan.Hash
         Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -ParameterFilter { $Method -eq 'POST' } {
@@ -606,16 +626,16 @@ Describe 'Guarded JSON batch deletion' {
         $results = @(Invoke-DeviceDeletionPlan @script:invoke)
 
         ($results | Where-Object Resource -eq 'Autopilot').Status | Should -Be 'OutcomeUnknown'
-        ($results | Where-Object Resource -eq 'Autopilot').VerificationStatus | Should -Be 'VerificationPending'
-        ($results | Where-Object Resource -eq 'Entra').Status | Should -Be 'BlockedDependency'
-        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 3 -Exactly -ParameterFilter { $Method -eq 'GET' }
+        ($results | Where-Object Resource -eq 'Autopilot').VerificationStatus | Should -Be 'NotRequested'
+        @($results | Where-Object Resource -eq 'Entra').Count | Should -Be 0
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0 -Exactly -ParameterFilter { $Method -eq 'GET' }
         Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 2 -Exactly -ParameterFilter { $Method -eq 'POST' }
         Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0 -ParameterFilter {
             $Method -eq 'POST' -and $Body -match 'entra-entra1'
         }
     }
 
-    It 'blocks dependent Entra removal when Autopilot HTTP 200 cannot be verified' {
+    It 'does not attempt denied read-back or Entra cleanup after HTTP 200' {
         $script:invoke.Plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records @(New-ScrappedBatchRecord)
         $script:invoke.ApprovalHash = $script:invoke.Plan.Hash
         Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -ParameterFilter { $Method -eq 'POST' } {
@@ -633,9 +653,9 @@ Describe 'Guarded JSON batch deletion' {
         $results = @(Invoke-DeviceDeletionPlan @script:invoke)
 
         ($results | Where-Object Resource -eq 'Autopilot').Status | Should -Be 'OutcomeUnknown'
-        ($results | Where-Object Resource -eq 'Autopilot').VerificationStatus | Should -Be 'OutcomeUnknown'
-        ($results | Where-Object Resource -eq 'Entra').Status | Should -Be 'BlockedDependency'
-        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1 -Exactly -ParameterFilter { $Method -eq 'GET' }
+        ($results | Where-Object Resource -eq 'Autopilot').VerificationStatus | Should -Be 'NotRequested'
+        @($results | Where-Object Resource -eq 'Entra').Count | Should -Be 0
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0 -Exactly -ParameterFilter { $Method -eq 'GET' }
         Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 2 -Exactly -ParameterFilter { $Method -eq 'POST' }
     }
 
@@ -669,7 +689,7 @@ Describe 'Guarded JSON batch deletion' {
         }
         $results = @(Invoke-DeviceDeletionPlan @script:invoke)
         ($results | Where-Object Resource -eq 'Autopilot').Status | Should -Be 'RemovalFailed'
-        ($results | Where-Object Resource -eq 'Entra').Status | Should -Be 'BlockedDependency'
+        @($results | Where-Object Resource -eq 'Entra').Count | Should -Be 0
     }
 
     It 'only verifies observed absence on an authoritative read-back 404' {
@@ -699,5 +719,63 @@ Describe 'Guarded JSON batch deletion' {
         }
         (Invoke-DeviceDeletionPlan @script:invoke -VerifyDeletion).VerificationStatus | Should -Be 'VerificationPending'
         Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 3 -Exactly -ParameterFilter { $Method -eq 'GET' }
+    }
+
+    It 'rejects a hash-valid legacy scrapped plan containing Entra before any Graph call' {
+        $script:plan.Workflow = 'Scrapped'
+        & (Get-Module StaleDeviceCleanup) {
+            param($Plan)
+            $Plan.Hash = Get-DeviceDeletionPlanHash -Plan $Plan
+        } $script:plan
+        $script:invoke.ApprovalHash = $script:plan.Hash
+        { Invoke-DeviceDeletionPlan @script:invoke } | Should -Throw '*workflow policy*'
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0
+    }
+
+    It 'persists responses before optional Intune verification' {
+        $script:invoke.Plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records @(New-ScrappedBatchRecord)
+        $script:invoke.ApprovalHash = $script:invoke.Plan.Hash
+        Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -ParameterFilter { $Method -eq 'GET' } {
+            $events = Get-Content $script:journalPath | ConvertFrom-Json
+            @($events | Where-Object Event -eq Response).Count | Should -Be 2
+            ($events | Where-Object Event -eq Response | Select-Object -First 1).Results[0].Status | Should -Be Removed
+            [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::NotFound)
+        }
+        Invoke-DeviceDeletionPlan @script:invoke -VerifyDeletion | Out-Null
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 1 -Exactly -ParameterFilter { $Method -eq 'GET' }
+    }
+
+    It 'handles 3343 serial rows and 6306 service operations without Autopilot sleeps or quadratic journal snapshots' {
+        $records = @(0..3342 | ForEach-Object {
+            [PSCustomObject]@{
+                MatchStatus = if ($_ -lt 3153) { 'Matched' } else { 'NotFound' }
+                NormalizedSerialNumber = "serial$_"; IntuneManagedDeviceId = "intune$_"
+                AutopilotIdentityId = "ap$_"; EntraObjectId = "entra$_"
+            }
+        })
+        $script:invoke.Plan = New-DeviceDeletionPlan -TenantId tenant1 -RunId run1 -Workflow Scrapped -Records $records
+        $script:invoke.ApprovalHash = $script:invoke.Plan.Hash
+        Mock Write-CleanupLog -ModuleName StaleDeviceCleanup { }
+        Mock Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup {
+            $requests = @((ConvertFrom-Json $Body).requests)
+            $requests.Count | Should -BeLessOrEqual 20
+            @($requests | Where-Object url -like '/devices/*').Count | Should -Be 0
+            [PSCustomObject]@{ responses = @($requests | ForEach-Object {
+                [PSCustomObject]@{ id = $_.id; status = if ($_.id -like 'autopilot-*') { 200 } else { 204 } }
+            }) }
+        }
+
+        $results = @(Invoke-DeviceDeletionPlan @script:invoke)
+
+        $results.Count | Should -Be 6306
+        @($results | Where-Object Status -eq OutcomeUnknown).Count | Should -Be 3153
+        @($results | Where-Object Status -eq Removed).Count | Should -Be 3153
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 316 -Exactly -ParameterFilter { $Method -eq 'POST' }
+        Should -Invoke Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0 -ParameterFilter { $Method -eq 'GET' }
+        Should -Invoke Start-Sleep -ModuleName StaleDeviceCleanup -Times 0
+        (Get-Item $script:journalPath).Length | Should -BeLessThan 12MB
+        $events = @(Get-Content $script:journalPath | ConvertFrom-Json)
+        @($events | Where-Object { $_.Results.Count -gt 20 }).Count | Should -Be 2
+        (Read-DeviceDeletionJournal $script:journalPath).Results.Count | Should -Be 6306
     }
 }

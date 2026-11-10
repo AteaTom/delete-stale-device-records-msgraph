@@ -26,7 +26,7 @@ $script:InvalidSerialNumbers = @(
 )
 
 . (Join-Path $PSScriptRoot 'DeviceDeletionBatch.ps1')
-. (Join-Path $PSScriptRoot 'DeviceCleanupResume.ps1')
+. (Join-Path $PSScriptRoot 'DeviceCleanupEvidence.ps1')
 
 #region Logging
 
@@ -473,7 +473,13 @@ function New-DeviceIndexes {
 
     $intuneByAadDeviceId = @{}
     $intuneById = @{}
+    $intuneBySerial = @{}
     foreach ($d in $IntuneDevices) {
+        $serial = ConvertTo-NormalizedSerialNumber $d.SerialNumber
+        if ($serial) {
+            if (-not $intuneBySerial.ContainsKey($serial)) { $intuneBySerial[$serial] = [System.Collections.Generic.List[object]]::new() }
+            $intuneBySerial[$serial].Add($d)
+        }
         if ($d.AzureAdDeviceId) {
             $key = $d.AzureAdDeviceId.ToString().ToLowerInvariant()
             if (-not $intuneByAadDeviceId.ContainsKey($key)) { $intuneByAadDeviceId[$key] = [System.Collections.Generic.List[object]]::new() }
@@ -506,6 +512,7 @@ function New-DeviceIndexes {
     return [PSCustomObject]@{
         IntuneByAadDeviceId        = $intuneByAadDeviceId
         IntuneById                 = $intuneById
+        IntuneBySerial             = $intuneBySerial
         AutopilotByAadDeviceId     = $autopilotByAadDeviceId
         AutopilotByManagedDeviceId = $autopilotByManagedDeviceId
         AutopilotBySerial          = $autopilotBySerial
@@ -768,7 +775,8 @@ function Get-StaleDeviceCandidates {
         [string[]]$ProtectedDeviceNames = @(),
         [string[]]$ProtectedNamePatterns = @(),
         [switch]$IncludeDisabledDevices,
-        [switch]$AllowOnPremisesSyncedDeletion
+        [switch]$AllowOnPremisesSyncedDeletion,
+        [hashtable]$HistoricalEvidence = @{}
     )
 
     $results = [System.Collections.Generic.List[object]]::new()
@@ -786,6 +794,26 @@ function Get-StaleDeviceCandidates {
         $entraSignInUtc = Get-SafeUtcTimestamp -Value $device.ApproximateLastSignInDateTime
 
         $activity = Get-EffectiveLastActivity -IntuneLastSyncDateTimeUtc $intuneLastSyncUtc -EntraApproximateLastSignInDateTimeUtc $entraSignInUtc
+        $history = $HistoricalEvidence[[string]$device.Id]
+        $historyInvalid = $false
+        $historicalAutopilot = $false
+        $historicalProtected = $false
+        if ($history) {
+            $historyInvalid = $history.Ambiguous -or $history.ActivityUnknown -or $history.DeviceId -ne [string]$device.DeviceId
+            $historicalTime = Get-SafeUtcTimestamp $history.LastActivityUtc
+            if ($historicalTime -and (-not $activity.EffectiveLastActivityUtc -or $historicalTime -gt $activity.EffectiveLastActivityUtc)) {
+                $activity = [PSCustomObject]@{ EffectiveLastActivityUtc = $historicalTime; ActivitySource = 'RetainedActivityEvidence' }
+            }
+            foreach ($serial in $history.SerialNumbers) {
+                if ($platform -eq 'Windows' -and $Indexes.AutopilotBySerial.ContainsKey([string]$serial)) { $historicalAutopilot = $true }
+                if ($Indexes.IntuneBySerial.ContainsKey([string]$serial)) {
+                    $current = $Indexes.IntuneBySerial[[string]$serial]
+                    if ($current.Count -ne 1 -or $current[0].AzureAdDeviceId -ne $device.DeviceId) { $historyInvalid = $true }
+                }
+                $serialProtection = Test-DeviceProtection -Device $device -IntuneSerialNumber $serial -ProtectionIndex $protectionIndex
+                if ($serialProtection.IsProtected) { $historicalProtected = $true }
+            }
+        }
 
         $protection = Test-DeviceProtection -Device $device -IntuneSerialNumber $intuneSerial `
             -ProtectedEntraObjectIds $ProtectedEntraObjectIds -ProtectedEntraDeviceIds $ProtectedEntraDeviceIds `
@@ -803,15 +831,19 @@ function Get-StaleDeviceCandidates {
             $decision = 'Excluded'; $reasonCode = 'UnsupportedPlatform'; $reasonDescription = 'Operating system platform is not supported by this tool.'
         } elseif ($platform -eq 'Unknown') {
             $decision = 'ManualReview'; $reasonCode = 'MissingOperatingSystem'; $reasonDescription = 'Operating system information is missing or ambiguous.'
+        } elseif ($historicalProtected) {
+            $decision = 'Excluded'; $reasonCode = 'ProtectedDevice'; $reasonDescription = 'Protected by retained serial association.'
         } elseif ($protection.IsProtected) {
             $decision = 'Excluded'; $reasonCode = 'ProtectedDevice'; $reasonDescription = $protection.Reason
+        } elseif ($historyInvalid) {
+            $decision = 'ManualReview'; $reasonCode = 'UnresolvedSafetyEvidence'; $reasonDescription = 'Retained activity or identity evidence is incomplete or ambiguous.'
         } elseif ($correlation.MatchStatus -eq 'Ambiguous') {
             $decision = 'ManualReview'
             $reasonCode = if ($correlation.AmbiguityReason -eq 'DuplicateSerialNumber') { 'DuplicateSerialNumber' } else { 'AmbiguousAutopilotMatch' }
             $reasonDescription = "Correlation is ambiguous: $($correlation.AmbiguityReason)."
         } elseif ($platform -eq 'Windows' -and $correlation.AutopilotMatch -and $correlation.MatchConfidence -ne 'High') {
             $decision = 'ManualReview'; $reasonCode = 'LowConfidenceMatch'; $reasonDescription = "Autopilot match confidence '$($correlation.MatchConfidence)' is insufficient for safe lifecycle correlation."
-        } elseif ($correlation.AutopilotMatch) {
+        } elseif ($correlation.AutopilotMatch -or $historicalAutopilot) {
             $decision = 'Excluded'; $reasonCode = 'AutopilotProtected'; $reasonDescription = 'Autopilot-backed devices require explicit hardware deregistration, not activity-based deletion.'
         } elseif (-not $activity.EffectiveLastActivityUtc) {
             $decision = 'ManualReview'; $reasonCode = 'MissingAllActivity'; $reasonDescription = 'No authoritative activity timestamp (Intune lastSyncDateTime or Entra approximateLastSignInDateTime) is available.'
@@ -863,6 +895,7 @@ function Get-StaleDeviceCandidates {
             AutopilotLastContactedDateTimeUtc       = if ($correlation.AutopilotMatch) { Get-SafeUtcTimestamp -Value $correlation.AutopilotMatch.LastContactedDateTime } else { $null }
             EffectiveLastActivityUtc                = $activity.EffectiveLastActivityUtc
             ActivitySource                          = $activity.ActivitySource
+            RetainedSerialNumbers                   = if ($history) { $history.SerialNumbers -join ';' } else { '' }
             DaysInactive                            = $daysInactive
             DisabledSinceUtc                        = $null
             CutoffDateUtc                           = $CutoffDateUtc
@@ -985,16 +1018,17 @@ function Show-ScrappedDeviceSummary {
     Write-Host ("  Duplicate CSV rows ignored:    {0}" -f $CsvDuplicateCount)
     Write-Host ("  Matched serial numbers:        {0}" -f $matchedSerials.Count)
     Write-Host ("  Serials with DELETE targets:   {0}" -f @($matchedRecords | Where-Object {
-        $_.IntuneManagedDeviceId -or $_.AutopilotIdentityId -or $_.EntraObjectId
+        $_.IntuneManagedDeviceId -or $_.AutopilotIdentityId
     } | Select-Object -ExpandProperty NormalizedSerialNumber -Unique).Count)
     Write-Host ''
     Write-Host 'Planned DELETE operations (unique records, not physical devices):'
     Write-Host ("  Autopilot records:             {0}" -f $autopilotIds.Count)
     Write-Host ("  Intune managed devices:        {0}" -f $intuneIds.Count)
-    Write-Host ("  Entra objects to remove:       {0}" -f $entraIds.Count)
-    Write-Host ("  Total DELETE operations:       {0}" -f ($intuneIds.Count + $autopilotIds.Count + $entraIds.Count))
-    Write-Host 'Order: Intune, Autopilot, Entra; failed dependencies block related targets.'
-    Write-Host 'Entra removal continues after all related Autopilot DELETE requests are accepted.'
+    Write-Host ("  Entra objects retained:        {0}" -f $entraIds.Count)
+    Write-Host ("  Total DELETE operations:       {0}" -f ($intuneIds.Count + $autopilotIds.Count))
+    Write-Host 'Order: Intune, Autopilot; failed Intune dependencies block related deregistration.'
+    Write-Host 'Autopilot submission is not completed deregistration. No Autopilot completion polling is performed.'
+    Write-Host 'Entra objects are retained for a later normal inactivity cleanup run.'
     Write-Host ''
     Write-Host 'Excluded from deletion:'
     Write-Host ("  Ambiguous serial numbers:      {0}" -f $ambiguousSerials.Count)
@@ -1098,7 +1132,7 @@ function Export-CleanupReports {
         'RunId', 'EvaluationTimestampUtc', 'EntraObjectId', 'EntraDeviceId', 'DeviceName',
         'Platform', 'OperatingSystem', 'OperatingSystemVersion', 'EntraAccountEnabled',
         'OnPremisesSyncEnabled', 'OnPremisesLastSyncDateTimeUtc', 'EffectiveLastActivityUtc',
-        'ActivitySource', 'DaysInactive', 'CutoffDateUtc', 'IntunePresent',
+        'ActivitySource', 'RetainedSerialNumbers', 'DaysInactive', 'CutoffDateUtc', 'IntunePresent',
         'IntuneManagedDeviceId', 'IntuneSerialNumber', 'AutopilotPresent',
         'AutopilotIdentityId', 'AutopilotSerialNumber', 'MatchStatus', 'MatchConfidence',
         'Decision', 'ReasonCode', 'ReasonDescription', 'MatchMethod', 'EntraAction', 'EntraRemovalStatus', 'ErrorMessage'
@@ -1345,10 +1379,10 @@ function New-RunSummary {
         $summary.DaysInactiveThreshold = $DaysInactive
     }
     if ($ScrappedDevices) {
-        $summary.TotalScrappedEntraToRemove = $summary.TotalScrappedEntraReview
+        $summary.TotalScrappedEntraToRemove = 0
         $summary.Remove('TotalScrappedEntraReview')
         Set-ScrappedDeviceOutcomes -Records $ScrappedDeviceRecords
-        foreach ($outcome in 'Complete', 'Partial', 'Blocked', 'Pending', 'Simulated', 'Excluded', 'NotFound', 'LookupFailed', 'NotAttempted') {
+        foreach ($outcome in 'Complete', 'Partial', 'Blocked', 'Pending', 'Simulated', 'Excluded', 'NotFound', 'LookupFailed', 'NotAttempted', 'DeferredToInactivity') {
             $summary["TotalScrapped$outcome"] = @($ScrappedDeviceRecords | Where-Object CleanupOutcome -eq $outcome |
                 Select-Object -ExpandProperty NormalizedSerialNumber -Unique).Count
         }
@@ -1845,13 +1879,14 @@ function Set-ScrappedDeviceOutcomes {
             foreach ($row in $rows) {
                 foreach ($service in @(
                     @{ Name = 'Intune'; Id = 'IntuneManagedDeviceId' },
-                    @{ Name = 'Autopilot'; Id = 'AutopilotIdentityId' },
-                    @{ Name = 'Entra'; Id = 'EntraObjectId' }
+                    @{ Name = 'Autopilot'; Id = 'AutopilotIdentityId' }
                 )) {
                     if (-not $row.($service.Id)) { continue }
                     $status = $row.("$($service.Name)RemovalStatus")
                     $verificationProperty = $row.PSObject.Properties["$($service.Name)VerificationStatus"]
-                    if ($service.Name -eq 'Autopilot' -and $status -in 'RemovalSubmitted', 'VerifiedAbsent', 'AlreadyRemoved') {
+                    if ($service.Name -eq 'Autopilot' -and $status -eq 'RemovalSubmitted') {
+                        'RemovalSubmitted'
+                    } elseif ($service.Name -eq 'Autopilot' -and $status -in 'VerifiedAbsent', 'AlreadyRemoved') {
                         'Removed'
                     } elseif ($verificationProperty -and $verificationProperty.Value -in 'OutcomeUnknown', 'VerificationPending') {
                         $verificationProperty.Value
@@ -1867,6 +1902,7 @@ function Set-ScrappedDeviceOutcomes {
         elseif (@($statuses | Where-Object { $_ -in 'RemovalFailed', 'OutcomeUnknown', 'BlockedDependency', 'Declined', 'Skipped' }).Count) {
             if (@($statuses | Where-Object { $_ -in 'Removed', 'VerifiedAbsent', 'AlreadyRemoved', 'AlreadyAbsent', 'RemovalSubmitted' }).Count) { 'Partial' } else { 'Blocked' }
         } elseif ($statuses -contains 'RemovalSubmitted' -or $statuses -contains 'VerificationPending') { 'Pending' }
+        elseif ($statuses.Count -eq 0 -and @($rows | Where-Object MatchStatus -eq 'Matched').Count) { 'DeferredToInactivity' }
         else { 'NotAttempted' }
         foreach ($row in $rows) {
             $row | Add-Member -NotePropertyName CleanupOutcome -NotePropertyValue $outcome -Force
@@ -1946,7 +1982,7 @@ function Complete-ProjectExecution {
     if ($RunSummary.ScrappedWorkflow) {
         $lines += "Scrapped serials: Input=$($RunSummary.TotalScrappedSerials) Matched=$($RunSummary.TotalScrappedMatchedSerials) Excluded=$($RunSummary.TotalScrappedExcludedSerials) Ambiguous=$($RunSummary.TotalScrappedAmbiguousSerials) NotFound=$($RunSummary.TotalScrappedNotFoundSerials) Errors=$($RunSummary.TotalScrappedErrors)"
         $lines += "Scrapped exclusions: $(@($RunSummary.ScrappedExclusionsByReason.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join '; ')"
-        $lines += "Scrapped cleanup: $(@('Complete', 'Partial', 'Blocked', 'Pending', 'Simulated', 'Excluded', 'NotFound', 'LookupFailed', 'NotAttempted' | ForEach-Object { "$_=$($RunSummary.("TotalScrapped$_"))" }) -join '; ')"
+        $lines += "Scrapped cleanup: $(@('Complete', 'Partial', 'Blocked', 'Pending', 'Simulated', 'Excluded', 'NotFound', 'LookupFailed', 'NotAttempted', 'DeferredToInactivity' | ForEach-Object { "$_=$($RunSummary.("TotalScrapped$_"))" }) -join '; ')"
     } else {
         $lines += "Evaluated=$($RunSummary.TotalEvaluated) Candidates=$($RunSummary.TotalCandidates) Excluded=$($RunSummary.TotalExcluded) ManualReview=$($RunSummary.TotalManualReview)"
         $lines += "Exclusions: $(@($RunSummary.ExclusionsByReason.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join '; ')"
@@ -1981,9 +2017,9 @@ function Complete-ProjectExecution {
 #endregion Execution lifecycle
 
 Export-ModuleMember -Function @(
-    'Get-LatestDeviceCleanupResumeSource',
-    'Read-DeviceCleanupResumeSource',
-    'Resolve-DeviceCleanupResumeRecords',
+    'Read-DeviceDeletionJournal',
+    'Open-DeviceCleanupEvidence',
+    'Update-DeviceCleanupEvidence',
     'Write-CleanupLog',
     'Test-Prerequisites',
     'Connect-DeviceCleanupGraph',

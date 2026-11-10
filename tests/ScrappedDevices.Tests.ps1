@@ -179,18 +179,18 @@ Describe 'Show-ScrappedDeviceSummary' {
         Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Matched serial numbers:        1' }
         Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Autopilot records:             1' }
         Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Intune managed devices:        1' }
-        Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Entra objects to remove:       1' }
+        Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Entra objects retained:        1' }
         Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Ambiguous serial numbers:      1' }
         Assert-MockCalled -CommandName Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter { $Object -eq '  Serial numbers not found:      1' }
         Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
-            $Object -eq '  Total DELETE operations:       3'
+            $Object -eq '  Total DELETE operations:       2'
         }
         Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
             $Object -eq '  Serials with DELETE targets:   1'
         }
     }
 
-    It 'counts validated Entra-only matches as destructive targets' {
+    It 'retains validated Entra-only matches without counting them as destructive targets' {
         $record = [PSCustomObject]@{
             NormalizedSerialNumber = 'serial1'; MatchStatus = 'Matched'
             AutopilotIdentityId = $null; IntuneManagedDeviceId = $null; EntraObjectId = 'entra1'
@@ -199,10 +199,10 @@ Describe 'Show-ScrappedDeviceSummary' {
         Show-ScrappedDeviceSummary -ScrappedDeviceRecords @($record) -OutputPath $TestDrive `
             -TenantId tenant1 -Mode Interactive -Simulation $true
         Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
-            $Object -eq '  Serials with DELETE targets:   1'
+            $Object -eq '  Serials with DELETE targets:   0'
         }
         Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
-            $Object -eq '  Entra objects to remove:       1'
+            $Object -eq '  Entra objects retained:        1'
         }
         Should -Invoke Write-Host -ModuleName StaleDeviceCleanup -Times 1 -ParameterFilter {
             $Object -eq 'Mode: Interactive; WhatIf: True'

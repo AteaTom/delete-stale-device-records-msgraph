@@ -271,7 +271,8 @@ Describe 'Action results and reconciled completion summaries' {
         )
         $scrappedPlan = New-DeviceDeletionPlan -TenantId synthetic-tenant -RunId synthetic-run -Workflow Scrapped -Records @($rows + $rows)
         $actions = @(Get-CleanupActionRecords -Plan $scrappedPlan -Records @($rows + $rows))
-        $actions.Count | Should -Be 3
+        $actions.Count | Should -Be 2
+        @($actions | Where-Object Resource -eq Entra).Count | Should -Be 0
         @($actions | Where-Object Resource -eq Autopilot).Count | Should -Be 1
         $actions.ReasonCode | Select-Object -Unique | Should -Be ExplicitScrappedCleanup
     }

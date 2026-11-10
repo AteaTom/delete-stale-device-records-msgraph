@@ -28,11 +28,11 @@ Entra deletion. No consent or tenant authorization was validated by offline test
 | --- | --- |
 | Audit | `Device.Read.All`, `DeviceManagementManagedDevices.Read.All`, `DeviceManagementServiceConfig.Read.All` |
 | Interactive / Automatic | All read scopes above, plus `Directory.AccessAsUser.All` |
-| Interactive / Automatic with `-ScrappedDevices` | All read scopes above, plus `DeviceManagementManagedDevices.ReadWrite.All`, `DeviceManagementServiceConfig.ReadWrite.All` and `Directory.AccessAsUser.All` |
-| Interactive / Automatic with `-ResumeFromRunPath` | All read scopes above, plus `Directory.AccessAsUser.All`; no Intune/Autopilot write scopes requested |
+| Interactive / Automatic with `-ScrappedDevices` | All read scopes above, plus `DeviceManagementManagedDevices.ReadWrite.All` and `DeviceManagementServiceConfig.ReadWrite.All`; no Entra write scope requested |
 
-`-ResumeLatest` selects the source locally and uses exactly the same scopes
-and approval requirements as `-ResumeFromRunPath`.
+`-ResumeLatest` and `-ResumeFromRunPath` are retired and rejected before
+connection. The later normal inactivity run requests its own permissions
+and requires fresh approval; it does not inherit retirement authorization.
 
 `Test-GraphPermissions` compares the scopes actually granted to the signed-in
 session (`(Get-MgContext).Scopes`) against the scopes required for the
@@ -72,24 +72,17 @@ before use in those environments.
   stale-device workflow, in any mode.
 - The one exception is the explicit `-ScrappedDevices` workflow: for
   serial numbers you provide, it removes the matching Windows Autopilot
-  identity, Intune managed device, and safely correlated Entra objects only
-  after Graph accepts the Autopilot DELETE request. It never acts on
+  identity after successful Intune managed-device prerequisites, and never
+  deletes Entra objects or waits for deregistration. It never acts on
   any serial number not present in that file.
 - iOS and Android devices are never looked up in, or deleted from, Windows
   Autopilot.
-- `-ResumeFromRunPath` can remove remaining approved Windows Entra objects
-  from an original scrapped run after read-only Autopilot absence checks and
-  fresh approval. It never submits Intune or Autopilot DELETE requests.
-  `-ResumeLatest` changes only local source discovery; it has the same scope.
+- Existing Graph sessions may contain more permissions than requested.
+  Executor workflow/resource checks still prohibit Entra deletion in scrapped mode.
 
-Both resume selectors reload Entra, Intune and Autopilot inventories; they
-therefore still need all three read scopes even though only Entra can be
-deleted. Exact-ID verification is read-only and an HTTP 403 never counts as
-absence. Tenant identity defaults to the validated source tenant; an explicit
-different tenant is rejected. With `-ResumeLatest`, `-TenantId` also filters
-eligible local sources before selection. Existing consented Graph sessions
-may contain more scopes than requested; resume does not use those additional
-write scopes to delete Intune or Autopilot records.
+`-EvidencePath` requires local read/write access to a protected persistent
+directory, not additional Graph permissions. Back up the entire directory,
+restrict its ACLs and keep it outside version control.
 
 JSON batching uses the same individual v1.0 DELETE permissions. There is no
 batch permission or permission bypass. Each envelope rechecks the approved

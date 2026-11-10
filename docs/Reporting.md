@@ -1,368 +1,129 @@
 # Reporting
 
-Every execution creates a timestamped folder: `output\<yyyyMMdd-HHmmss>\`.
-Legacy lifecycle files may exist at the output root but are not used as a
-deletion gate.
-
-All CSV files use UTF-8 encoding and are written even when empty (guaranteed
-by `Export-ReportCsv`). Every row includes the run's `RunId`.
+Each invocation creates `output\<yyyyMMdd-HHmmss>\` under `-OutputPath`,
+adding a run-ID suffix on collision. CSVs use UTF-8 and are written even when
+empty. Initial reports precede approval; final reports reconcile journal
+outcomes. Existing run folders are not rewritten.
 
 | File | Contents |
 | --- | --- |
-| `AllEvaluatedDevices.csv` | Every Entra device evaluated, with full detail and `Decision` |
-| `DeletionCandidates.csv` | Subset with `Decision = Candidate` — written **before** any confirmation prompt |
-| `DeletedDevices.csv` | Subset where `EntraRemovalStatus` = `Removed`, or `AutopilotRemovalStatus` is `Removed`/`AlreadyRemoved` |
-| `UnknownDevices.csv` | Subset with `Decision = ManualReview` |
-| `AmbiguousMatches.csv` | Subset with `MatchStatus = Ambiguous` |
-| `ExcludedDevices.csv` | Other `Decision = Excluded` records, excluding `OnPremisesSyncProtected` and `AutopilotProtected` |
-| `ADSyncedDevices.csv` | Devices excluded with primary reason `OnPremisesSyncProtected`; includes `SourceADDeletionSafety = NotAssessed` |
-| `AutopilotProtectedDevices.csv` | Devices excluded with primary reason `AutopilotProtected`, including correlation and AD-sync evidence |
-| `ErrorDevices.csv` | Subset with a non-null `ErrorMessage` |
-| `OnPremisesSyncedReview.csv` | Compatibility alias of `ADSyncedDevices.csv`; deprecated name retained for existing consumers |
-| `ScrappedDeviceResults.csv` | Scrapped targets/outcomes or resume Entra rows with source linkage, plus exclusions and lookup failures; empty for inactivity cleanup |
-| `RunSummary.json` | Machine-readable run outcome (counts, exit code, timestamps) |
-| `ExecutionLog.txt` | Human-readable timestamped INFO/WARNING/ERROR/SUCCESS events and final summary; verbose/debug detail is not written here |
-| `ActionResults.csv` | One final row per unique planned DELETE operation, including unattempted or simulated targets |
-| `DeletionPlan.json` | Tenant/run/workflow, creation time, unique operations, prerequisites and SHA-256 hash; written before confirmation |
-| `DeletionJournal.jsonl` | Append-only submission intent, per-ID outcomes, attempts and final/verification checkpoints |
+| `AllEvaluatedDevices.csv` | Every normal-run Entra evaluation, activity, correlation, reason and action |
+| `DeletionCandidates.csv` | Candidate subset, not proof of completed deletion |
+| `DeletedDevices.csv` | Newly removed normal-run devices |
+| `UnknownDevices.csv` | ManualReview subset |
+| `AmbiguousMatches.csv` | Ambiguous correlation subset |
+| `ADSyncedDevices.csv` | Primary reason OnPremisesSyncProtected; SourceADDeletionSafety=NotAssessed |
+| `OnPremisesSyncedReview.csv` | Deprecated compatibility alias; do not double-count |
+| `AutopilotProtectedDevices.csv` | Primary reason AutopilotProtected |
+| `ExcludedDevices.csv` | Other exclusions, excluding the two dedicated protection reports |
+| `ErrorDevices.csv` | Evaluated devices with errors |
+| `ScrappedDeviceResults.csv` | Scrapped object-level correlation/results, exclusions and lookup failures; empty for normal cleanup |
+| `ActionResults.csv` | One row per unique planned DELETE operation |
+| `RunSummary.json` | Final run, workflow, counts, timestamps and exit code |
+| `ExecutionLog.txt` | Timestamped operational events, warnings and reconciled completion totals |
+| `DeletionPlan.json` | Tenant/run/workflow, creation time, operation IDs, prerequisites and content hash |
+| `DeletionJournal.jsonl` | Append-only intent, delta outcomes and full final checkpoint |
 
-## Administrator logging and reconciliation
+## Interpreting the two-run workflow
 
-All new reports use the existing run folder and UTF-8 CSV helper. Protection
-reports and `ActionResults.csv` have stable headers even when empty.
-CSV reports are snapshots: written before confirmation where applicable and
-overwritten with final results within that run, never appended. Execution
-events and the deletion journal remain append-only within the run. Historical
-artifacts are not migrated or rewritten.
+Scrapped plans and action CSVs contain **Intune/Autopilot only**. Related
+Entra identifiers remain informational in scrapped rows; their
+`EntraRemovalStatus` stays `NotAttempted`. The console displays Entra objects
+as retained, not planned DELETEs. Successful deregistration submission is
+`RemovalSubmitted`; it is not proof of service/portal disappearance.
 
-Protection routing uses the classifier's existing **primary reason**, not a
-second eligibility evaluation. Autopilot protection precedes AD-sync protection:
-a device associated with both goes only to `AutopilotProtectedDevices.csv`,
-with `OnPremisesSyncEnabled` retained. Explicit protection and unsafe correlation
-can take precedence; those records retain their existing reason/report routing.
-Recent or missing activity on an AD-synced device does not make it an
-`OnPremisesSyncProtected` record. The explicit AD-sync override is unchanged.
+| Scrapped CleanupOutcome | Meaning |
+| --- | --- |
+| Pending | An Autopilot request was accepted, or optional Intune read-back remains pending |
+| Complete | All applicable Intune/Autopilot targets have terminal successful outcomes; does not claim Entra removal |
+| DeferredToInactivity | Correlated row has no Intune/Autopilot target; Entra is retained |
+| Partial | Some applicable service targets succeeded and another failed/unresolved |
+| Blocked | Failure/unresolved outcome without successful targets |
+| Simulated | Applicable operations were WhatIf |
+| Excluded / NotFound / LookupFailed / NotAttempted | Safety exclusion, no reliable current match, discovery failure, or no submission |
 
-`AllEvaluatedDevices.csv` still contains every evaluated device. Reconcile:
+Accepted Autopilot submission alone can yield exit 0 with Pending serials.
+HTTP 200 remains OutcomeUnknown and yields a non-success result; neither
+portal absence nor a removed object is inferred. `-VerifyDeletion` never
+reads Autopilot. Intune verification failure/pending remains visible in
+verification fields and affects the exit result.
+
+The later normal run creates its own reports and Entra-only plan. It uses
+fresh discovery, retained safety evidence, `DaysInactive` and all protections.
+Scrapped reports and journals are not replayed for Entra deletion.
+`-ResumeLatest` / `-ResumeFromRunPath` explicitly throw before initialization.
+
+## Activity and protection evidence
+
+Normal report columns include platform, Entra IDs, current Intune/Autopilot
+associations, activity, cutoff, correlation confidence, reason and statuses.
+`RetainedSerialNumbers` exposes retained serial associations used for
+protection. `ActivitySource=RetainedActivityEvidence` identifies a retained
+timestamp newer than current signals. `UnresolvedSafetyEvidence` identifies
+missing historical Intune activity, conflicting/changed IDs or unsafe retained
+serial associations requiring manual review.
+
+Durable evidence lives in `-EvidencePath`, default repository-relative `.state`,
+**not** in temporary run reports. Protect/back up this directory and retain it
+across upgrades and changes of output location. It is not approval or a queue.
+`SafetyEvidenceSaved` records its path and device count before execution.
+See [Architecture.md](Architecture.md) for atomic updates and corruption checks.
+
+Dates export as invariant UTC round-trip strings, preserving fractional
+seconds. Typed local/offset dates are converted to UTC; unspecified dates
+require an explicitly UTC field contract. Historical timezone-free CSV dates
+must not be guessed as precise UTC evidence. Names are informational only.
+
+## Action and summary reconciliation
+
+Action fields include RunId, Workflow, FinalizedTimestampUtc, OperationId,
+Resource, ObjectId, DeviceName, EntraDeviceId, SerialNumber, Action, ReasonCode,
+Outcome, Attempts, HttpStatus, VerificationStatus and sanitized ErrorMessage.
+Finalization time is not deletion time; use journal timestamps for submission.
+
+`TotalPlannedActions` equals action rows and the sum of `ActionOutcomes`.
+`TotalAttemptedActions` counts unique operations with Attempts > 0;
+`TotalRetryAttempts` counts extra submission attempts. Audit/WhatIf attempts
+are zero. `Removed` is distinct from `AlreadyAbsent`, `RemovalSubmitted`
+and verification evidence. Historical VerifiedAbsent Autopilot statuses remain
+readable but new scrapped runs do not generate them by polling.
+
+Scrapped Entra-removal summary counters are retained for report compatibility
+and remain zero in new runs. Related Entra IDs remain informational in scrapped CSV rows.
+Scrapped summaries omit DaysInactiveThreshold/CutoffDateUtc; normal summaries
+include them. Pending, Complete, Partial, Blocked and other serial totals use
+unique normalized serials, not expanded correlation-row counts.
+`TotalRunErrors` can overlap device/serial errors; do not add them as unique
+errors.
+
+For normal runs:
 
 ```text
 TotalEvaluated = TotalCandidates + TotalExcluded + TotalManualReview
 TotalExcluded = ADSyncedDevices rows + AutopilotProtectedDevices rows + ExcludedDevices rows
 ```
 
-This intentionally changes `ExcludedDevices.csv` membership. Consumers needing
-all exclusions must filter `AllEvaluatedDevices.csv` by `Decision = Excluded`,
-or combine the three mutually exclusive reports. Do not also count the
-compatibility alias. The scrapped workflow continues to report exclusions in
-`ScrappedDeviceResults.csv`; Autopilot presence is not protection from an
-explicit, safely correlated scrapped cleanup.
+Routing uses each device's primary reason, not a second classification pass.
+Protection/ambiguity can precede Autopilot; Autopilot precedes AD-sync.
 
-Device reports identify the run, evaluation time, friendly name, platform,
-Entra object/device IDs, available Intune/Autopilot IDs and serials, primary
-reason/description, correlation confidence, activity evidence and action
-outcome. Names are for recognition, never correlation authority. Missing values
-stay empty rather than being guessed.
+## Live logging and journal readers
 
-`ActionResults.csv` is finalized after journal recovery and includes `RunId`,
-`Workflow`, `FinalizedTimestampUtc`, `OperationId`, `Resource`, `ObjectId`,
-`DeviceName`, available `EntraDeviceId` and `SerialNumber`, `Action`,
-`ReasonCode`, `Outcome`, `Attempts`, `HttpStatus`, `VerificationStatus` and
-sanitized `ErrorMessage`. The timestamp describes finalization, **not** the
-time of deletion; use journal timestamps for submission/checkpoint evidence.
-Expanded scrapped rows are collapsed by the plan's unique resource/object ID.
+Follow `ExecutionLog.txt` with `Get-Content -LiteralPath '<run>\ExecutionLog.txt' -Wait`.
+Resolution logs inventory counts, indexes, progress every 100 serials and
+elapsed time. Export and plan building have separate boundary events.
+Deletion logs start, service phases, batch submissions, retries, per-operation
+ActionResult progress, and terminal ActionAttention warnings. The completion
+block and summary JSON share the same finalized counts. Cancelled, error-free
+runs show a concise cancellation message while retaining detailed log evidence.
 
-The completion block is written to the console and normal log from the same
-finalized `RunSummary.json` data. Additive fields include `TenantId`,
-`TotalADSyncedDevices`, `TotalAutopilotProtectedDevices`,
-`TotalOtherExcludedDevices`, `ExclusionsByReason`, `ManualReviewByReason`,
-`ScrappedExclusionsByReason`, `TotalPlannedActions`, `TotalAttemptedActions`,
-`TotalRetryAttempts`, `ActionOutcomes`, `ActionsByResource`,
-`TotalVerificationPending`, `TotalVerificationUnknown` and `TotalRunErrors`.
-Existing JSON fields keep their meaning.
-When an administrator cancels Interactive confirmation (exit code 5), with no
-attempted deletions or reported errors, the console instead shows
-`Deletion cancelled. No changes were made.` and the report path. This applies
-to inactivity, scrapped and resume runs, including `-WhatIf`. The detailed
-completion block remains in `ExecutionLog.txt`, and JSON/CSV reports are still finalized with unattempted
-actions recorded as `NotAttempted`. Runs with errors retain the detailed console
-summary so cancellation does not hide failures.
-Direct module callers must supply finalized `ActionRecords` to
-`New-RunSummary` and `Complete-ProjectExecution` for operation totals and the
-action CSV; the script obtains these through `Get-CleanupActionRecords`.
+Successful scope lists and discovery-start details use Verbose; Debug uses
+the debug stream. Neither is duplicated into the normal log. Error bodies
+are restricted to sanitized code/message, not raw payloads or credentials;
+embedded line breaks/quotes are escaped in text logs.
 
-`ActionOutcomes` counts final statuses; its values sum to `TotalPlannedActions`
-and to `ActionResults.csv` rows. An attempted action has `Attempts > 0`, counted
-once even if retried; `TotalRetryAttempts` counts extra submission attempts.
-Submission intent without a trustworthy response remains `OutcomeUnknown`,
-not success. Audit/WhatIf actions have zero actual submission attempts.
-`Removed` is distinct from `AlreadyAbsent`/`AlreadyRemoved`,
-`RemovalSubmitted` and `VerifiedAbsent`; accepted Autopilot submission does
-not establish absence. `VerifiedAbsent` means the Autopilot DELETE returned
-an unexpected HTTP 200 and immediate exact-ID read-back confirmed 404.
-Verification uncertainty remains separate from the DELETE outcome.
-`TotalRunErrors` counts errors reaching the run-level catch, including failures
-before any device can be evaluated; it can overlap device/serial errors and
-must not be added to them as a unique-error total.
-
-Normal logging keeps successful discovery counts, tenant identity, planning,
-authorization/safety gates, retry-round warnings, terminal operation failures,
-verification uncertainty and the completion summary. Each failed/unknown/blocked
-operation has a final `Event=ActionAttention` warning with run, resource,
-object ID, outcome, attempts, HTTP status and reason. A failed retry budget is
-visible even when no final Graph response exists.
-
-Before deletion in the scrapped workflow, the log records
-`Event=ScrappedResolutionStarted` with inventory counts,
-`Event=ScrappedIndexesBuilt`, `Event=ScrappedResolutionProgress` after each
-100 input serials (when more remain), and `Event=ScrappedResolutionCompleted`.
-Progress and completion include elapsed milliseconds. Initial CSV export and
-plan building have separate `ReportExportStarted`/`ReportExportCompleted` and
-`DeletionPlanStarted`/`DeletionPlanCompleted` events. These local preparation
-events do not mean any DELETE has been submitted.
-
-During deletion, `ExecutionLog.txt` is appended live so it can be followed with
-`Get-Content -Wait`: `Event=DeletionStarted`, `Event=PhaseStarted` per
-resource, `Event=BatchSubmitting` before each Graph batch, one
-`Event=ActionResult` line per device operation as soon as its outcome is known
-(with `Progress=n/total`, resource, object ID, device name/serial when known,
-outcome, attempts and HTTP status), and `Event=DeletionPhasesCompleted`.
-Successful outcomes use `SUCCESS`, failed/unknown/blocked outcomes use
-`WARNING`, and `-WhatIf` simulations log `Outcome=WhatIf` at `INFO`. The log is
-also written during `-WhatIf` runs; no tenant change occurs.
-
-Discovery starts, successful scope lists and protected-input paths use
-`-Verbose`; DEBUG uses the debug stream. Neither diagnostic
-level is appended to `ExecutionLog.txt`. Preserve diagnostic streams using your
-PowerShell wrapper when needed; the journal still retains submission and retry
-evidence. Graph response detail is restricted to error code/message, not raw
-response dumps. Credential fields and bearer values are redacted from log/error
-text, and embedded newlines/quotes are escaped in text events.
-Credential redaction handles escaped quotes, and verification error text is
-sanitized before it reaches the journal or device CSV reports.
-Do not deliberately
-include credentials, tokens or unrelated personal data in diagnostic messages.
-Log-file write failures remain visible as warnings.
-
-## Evaluated-device columns
-
-Pre-confirmation summaries are workflow-specific. Both display tenant, mode,
-WhatIf state and transport. Audit and WhatIf explicitly state that no tenant
-DELETE requests will be sent; displayed targets are planned, not completed.
-
-Stale cleanup shows unique actionable Entra objects by platform, with
-Autopilot-backed devices listed as retained rather than deletion candidates.
-Explicit protection and on-premises sync protection have separate counts.
-No Intune or Autopilot deletion is planned by this workflow.
-
-Scrapped cleanup shows matched serials separately from serials with actual
-Intune/Autopilot/Entra DELETE targets. Counts of unique objects sum to DELETE
-operations, not physical devices. Required Intune success before Autopilot and
-accepted Autopilot DELETE requests before Entra are displayed explicitly.
-These are alternatives, not combined workflows: `-ScrappedDevices` and both
-resume selectors bypass stale cleanup. Resume uses the scrapped summary
-layout with zero Intune/Autopilot DELETE targets and displays its original
-source separately.
-
-See `AllEvaluatedDevices.csv` header for the authoritative list; it matches
-the field list documented in the project specification, including
-`EffectiveLastActivityUtc`, `ActivitySource`, `MatchConfidence`,
-`ReasonCode`, `ReasonDescription`, `EntraAction`, `EntraDisableStatus`,
-`AutopilotRemovalStatus`, and `EntraRemovalStatus`. Timestamps are ISO 8601
-UTC. Legacy lifecycle columns may remain in historical reports; they are no
-longer used as a removal gate.
-
-CSV export serializes typed `DateTime` and `DateTimeOffset` values as invariant
-UTC round-trip strings, for example `2026-04-09T18:51:36.5885471Z`, preserving
-fractional seconds. Local dates and offset-aware dates are converted to UTC.
-An unspecified `DateTime` is treated as UTC only when its field name ends in
-`Utc`; unspecified dates without that contract raise an export error.
-Existing strings and nulls are not reinterpreted, and source objects remain
-typed and unchanged.
-
-Historical CSV files may contain timezone-free, second-precision dates from
-default PowerShell formatting. Do not parse those as local timestamps or
-infer lost precision; use matching JSON/log evidence where available.
-Preserve historical run artifacts unchanged.
-
-Autopilot-backed lifecycle records are excluded (`AutopilotProtected`) or sent
-to manual review. Stale cleanup never submits an Autopilot DELETE.
-
-Entra lifecycle statuses include `Removed`, `AlreadyAbsent` (batch-specific
-idempotent completion, not deletion by this run), `RemovalFailed`,
-`OutcomeUnknown`, `Declined`, `WhatIf`, `Skipped`, and
-`NotAttempted`. `RunSummary.json` includes planned and completed removal
-counts, and `ExecutionLog.txt` records the same counts at planning and
-completion. `RunSummary.json` also includes
-`TotalAutopilotRemovalSubmitted` and `TotalAutopilotVerifiedAbsent` separately
-from `TotalAutopilotRemoved`.
-It also records `TotalOnPremisesSyncedReview` and whether the explicit
-`AllowOnPremisesSyncedDeletion` override was enabled.
-`TotalEntraDevicesAlreadyAbsent` counts batch idempotent completion separately
-from records deleted by this run. Scrapped runs also include
-`TotalScrappedExcludedSerials` and `TotalScrappedEntraToRemove`.
-Scrapped summaries omit `DaysInactiveThreshold` and `CutoffDateUtc` entirely,
-including empty-input and error runs. `ScrappedWorkflow` explicitly identifies
-the chosen parameter set, not merely the presence of result rows.
-
-`OnPremisesSyncedReview.csv` contains only otherwise-stale devices excluded
-because they are synchronized from on-premises Active Directory. It includes
-the Entra identifiers and available activity, sync, Intune, and Autopilot
-evidence for an administrator to investigate in source AD. The
-`SourceADDeletionSafety` field is always `NotAssessed`: this report is not a
-recommendation or authorization to delete an AD computer object. This script
-does not inspect or modify source Active Directory.
-
-## Scrapped-device columns
-
-`ScrappedDeviceResults.csv` includes: `InputSerialNumber`,
-`NormalizedSerialNumber`, `MatchStatus` (`Matched`/`Ambiguous`/`NotFound`/`Excluded`/`LookupFailed`),
-`AmbiguityReason`, `AutopilotIdentityId`, `AutopilotEnrollmentState`,
-`IntuneManagedDeviceId`, `IntuneDeviceName`, `EntraObjectId`,
-`EntraDeviceId`, `EntraDeviceName`, `CorrelationMethod`, and per-target
-`AutopilotRemovalStatus`, `IntuneRemovalStatus`, `EntraRemovalStatus`.
-Scrapped-device Autopilot states include `RemovalSubmitted`, `VerifiedAbsent`,
-`AlreadyRemoved`, `RemovalFailed`, `OutcomeUnknown`, `BlockedDependency`,
-`Declined`, `WhatIf`, `NotApplicable` and `NotAttempted`.
-Intune states include `Removed`, `AlreadyRemoved`, `RemovalFailed`, `OutcomeUnknown`, `Declined`,
-`WhatIf`, `Skipped`, `NotApplicable`, and `NotAttempted`. Autopilot also uses
-`BlockedDependency` when required Intune removal did not succeed.
-Entra uses `Removed`, `AlreadyAbsent`, `RemovalFailed`, `BlockedDependency`,
-`WhatIf`, `Declined`, `NotApplicable` and `NotAttempted`.
-`AlreadyAbsent` is not counted as deletion by this run.
-
-`IntuneLookupStatus`, `AutopilotLookupStatus` and `EntraLookupStatus` distinguish
-`Found`, `NotFound`, `SkippedUnsafeCorrelation` and `FailedLookup`. On incomplete
-inventory discovery, earlier successful services report
-`LookupSucceededCorrelationBlocked`; later services report `NotAttempted`.
-Incomplete discovery prevents all writes and does not establish absence.
-Repeated rows share a per-serial `CleanupOutcome`: `Complete`, `Partial`,
-`Blocked`, `Pending`, `Simulated`, `Excluded`, `NotFound`, `LookupFailed` or
-`NotAttempted`. `Complete` requires every target to have a successful or
-already-absent outcome, with Autopilot absence verified. Accepted-but-unverified
-Autopilot removal (including `AlreadyRemoved`) is pending, not complete.
-When optional final verification is requested, continued visibility produces
-`Pending` and denied/failed read-back produces `Blocked` or `Partial`, never
-`Complete`, even when DELETE was accepted. Confirmed unresolved cleanup exits
-nonzero; Audit and WhatIf never claim real cleanup.
-
-`RemovalSubmitted` means the supported Autopilot identity DELETE returned the
-documented HTTP 204. It confirms submission, not immediate disappearance from
-the Autopilot portal; the service completes that work asynchronously.
-`VerifiedAbsent` means an unexpected HTTP 200 was followed by an exact-ID
-GET returning 404 during the immediate bounded checks.
-Only this verified absence permits dependent Entra
-removal for that response. It is counted separately in
-`TotalScrappedAutopilotVerifiedAbsent`.
-
-Resume creates separate `ScrappedDeviceResults.csv` and action/summary reports
-for the new Entra-only plan. Resume rows add `SourceRunId`, `SourcePlanHash`,
-`SourceEntraObjectId`, `SourceAutopilotIdentityIds` and
-`CorrelationMethod=PriorApprovedEntraObjectId`.
-Excluded targets retain their original ID in `SourceEntraObjectId` but do not
-populate a deletion target. `AmbiguityReason` explains protection, management,
-identifier or prerequisite exclusions. `ResumeStarted`/`ResumeTarget` log
-events link the new run to its source; `RunSummary.json` also includes the
-source run ID/hash. `ResumeAutopilotVerification` log events record each
-exact-ID GET outcome; original Autopilot/Intune outcomes remain in the original
-journal and are not counted as new DELETE attempts.
-If a timestamped output folder already exists, a run-ID suffix prevents
-overwriting its reports or execution log.
-Automatic `-ResumeLatest` selection adds `ResumeSourceSelected` with source
-path/run/hash; `ResumeSourceSkipped` warnings explain invalid journal sources.
-Source discovery itself is local and does not submit Graph requests.
-
-For scrapped-device runs, the completion log and `RunSummary.json` count
-Autopilot submissions, read-back-confirmed absent, already-absent and failed
-objects, Intune removals, and Entra removed, already-absent, failed and blocked
-objects by unique nonempty object ID, not by expanded CSV row.
-The summary also includes unique input, matched,
-ambiguous, not-found, and error serial counts. This prevents one serial
-expanded across multiple object rows from inflating completion totals.
-
-Deletion uses Graph JSON batches of at most 20 unique target operations.
-Identified transient failures are retried within bounded limits, and a failed
-target is reported individually while processing continues for unrelated
-targets where safe.
-
-Only safely corroborated matches are reported as `Matched`; serial-only
-collisions remain `Ambiguous`. Protection, unsupported/missing platforms,
-synchronization protection and conflicting identifiers produce `Excluded`,
-with the reason in `AmbiguityReason`.
-Only `Matched` rows are ever acted on.
-
-Before mode validation or an interactive deletion prompt, the console summary
-shows unique counts for input and matched serial numbers, the number of
-case-insensitive duplicate CSV rows ignored, exact unique Intune/Autopilot
-records and Entra objects to remove, and ambiguous/excluded/not-found
-serials. Blank rows and the required
-header are excluded from the duplicate count.
-`ScrappedDeviceResults.csv` is written first so its object-level rows can be
-reviewed before confirmation.
-
-### Resume report interpretation
-
-Resume reuses `Workflow=Scrapped` in plans/action reports and
-`ScrappedWorkflow=true` in the summary; it does not introduce a `Resume`
-plan-workflow value. `SourceRunId`/`SourcePlanHash` identify its original source
-after source validation succeeds. Standard inactivity reports are empty;
-review `ScrappedDeviceResults.csv` and `ActionResults.csv` instead.
-
-One resume row represents one considered original Entra operation. It retains
-the first associated serial as its display serial; all associated source rows
-are checked for identifiers, serials and protection. Serial-based summary
-counts therefore need not equal object counts. `SourceAutopilotIdentityIds`
-is semicolon-separated evidence, not an Autopilot deletion target.
-Autopilot/Intune target fields are empty; eligible Entra rows use
-`NotApplicable` for their non-target service removal statuses.
-
-| `AmbiguityReason` | Interpretation |
-| --- | --- |
-| `EntraAlreadyAbsent` | Original Entra ID is absent from fresh complete inventory; `MatchStatus=NotFound`, no DELETE |
-| `AmbiguousEntraObjectId` | Multiple current entries for the original object ID |
-| `NoOriginalAutopilotDependency` | Original Entra operation has no Autopilot prerequisite; outside resume scope |
-| `UnsupportedOrMissingPlatform` | Current target is not a Windows client |
-| `ConflictingIdentifiers` | Missing/zero, changed or nonunique Entra device ID, or conflicting saved IDs |
-| `OnPremisesSyncProtected` | Current AD synchronization protection applies |
-| `InvalidSerialNumber` | Original serial is missing or a placeholder |
-| `CurrentManagementOrAmbiguousCorrelation` | Current management correlation exists/is ambiguous, or an original serial remains in Intune/Autopilot |
-| `ProtectedDevice` | Current explicit protection matches |
-| `IntunePrerequisiteUnresolved` | Required original Intune removal has not succeeded |
-| `AutopilotPrerequisiteUnresolved` | Original Autopilot result lacks a qualifying HTTP 200/204 DELETE attempt |
-| `AutopilotAbsenceNotVerified` | Exact-ID Autopilot GET did not establish 404 absence |
-
-These are resume `AmbiguityReason` values, not inactivity `ReasonCode` values.
-Only considered, unattempted/blocked original Entra operations produce rows;
-previously removed, declined, failed or uncertain attempted Entra operations
-are not new resume targets. No rows can also mean no operations are resumable,
-not that the historical run is fully reconciled. Preserve original evidence.
-
-## Reason codes
-
-`MissingAllActivity`, `UnsupportedPlatform`, `MissingOperatingSystem`,
-`AmbiguousAutopilotMatch`, `DuplicateSerialNumber`, `LowConfidenceMatch`,
-`ProtectedDevice`, `OnPremisesSyncProtected`, `AutopilotProtected`, `RecentActivityDetected`, `DisabledTracking`,
-`Stale`.
-
-(`IncompleteGraphData`, `ConflictingIdentifiers`, and `GraphReadError` are
-reserved reason codes for future per-device error handling refinements.)
-
-## Batch outcomes and verification
-
-The journal preserves partial outcomes if batching stops or throws. Requests
-missing a trustworthy result remain `OutcomeUnknown`; do not rerun deletion
-blindly. `AlreadyAbsent` is not counted as newly removed.
-
-Optional `EntraVerificationStatus`, `IntuneVerificationStatus` and
-`AutopilotVerificationStatus` distinguish `NotRequested`, `VerifiedAbsent`,
-`VerificationPending` and `OutcomeUnknown` from the DELETE operation status.
-Batch result mapping includes these columns on every row, using `NotRequested`
-when no verification result applies, so CSV column selection cannot omit them.
-Denied or unsuccessful read-back never establishes absence. Verification
-uncertainty is logged and results in a non-success run outcome.
-See [BatchDeletion.md](BatchDeletion.md).
-
-Accepted Autopilot DELETE responses permit dependent Entra operations;
-optional final `VerifyDeletion` read-back occurs afterward and does not gate
-that dependency. Simulations report `NotRequested`, never `VerifiedAbsent`.
-If correlation evidence is gone, `NotFound` is not proof
-that an historical Entra object was deleted.
+New journal records have SchemaVersion=2. Approved/Final are full checkpoints;
+Submitting/Response/Verification contain affected-operation updates. Do not
+treat intermediate records as complete snapshots. `Read-DeviceDeletionJournal`
+streams to a final checkpoint and rejects malformed/incomplete final records.
+Legacy full final checkpoints remain readable for investigation. See
+[BatchDeletion.md](BatchDeletion.md) for the schema and recovery contract.

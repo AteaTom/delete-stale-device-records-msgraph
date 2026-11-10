@@ -43,7 +43,7 @@ Describe 'Parameter validation' {
     It 'reloads an older module when required workflow or batch commands are missing' {
         $scriptContent = Get-Content -LiteralPath $script:scriptPath -Raw
 
-        $scriptContent | Should -Match "requiredModuleVersion = \[version\]'1\.3\.0'"
+        $scriptContent | Should -Match "requiredModuleVersion = \[version\]'1\.4\.0'"
         $scriptContent | Should -Match 'loadedModule\.Version -eq \$requiredModuleVersion'
         $scriptContent | Should -Match "Get-Command -Name 'New-RunSummary'.*ErrorAction SilentlyContinue"
         $scriptContent | Should -Match "newRunSummaryCommand\.Parameters\.ContainsKey\('AllowOnPremisesSyncedDeletion'\)"
@@ -439,26 +439,26 @@ Describe 'End-to-end mode behavior (fully mocked Graph)' {
 
         Assert-MockCalled -CommandName Update-MgDevice -ModuleName StaleDeviceCleanup -Times 0
         Assert-MockCalled Remove-MgDevice -ModuleName StaleDeviceCleanup -Times 0
-        Assert-MockCalled Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 3 -Exactly -ParameterFilter { $Method -eq 'POST' }
+        Assert-MockCalled Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 2 -Exactly -ParameterFilter { $Method -eq 'POST' }
         Assert-MockCalled Invoke-MgGraphRequest -ModuleName StaleDeviceCleanup -Times 0 -ParameterFilter { $Method -eq 'GET' }
         Assert-MockCalled Remove-MgDeviceManagementManagedDevice -ModuleName StaleDeviceCleanup -Times 0
         Assert-MockCalled Remove-MgDeviceManagementWindowsAutopilotDeviceIdentity -ModuleName StaleDeviceCleanup -Times 0
         $runFolder = Get-ChildItem -Path $script:runOutputPath -Directory | Select-Object -First 1
         $executionLog = Get-Content -LiteralPath (Join-Path $runFolder.FullName 'ExecutionLog.txt') -Raw
-        $executionLog | Should -Match 'Actions: Planned=3 Attempted=3 RetryAttempts=0; Removed=2; RemovalSubmitted=1; VerifiedAbsent=0; AlreadyAbsent=0; AlreadyRemoved=0; RemovalFailed=0'
+        $executionLog | Should -Match 'Actions: Planned=2 Attempted=2 RetryAttempts=0; Removed=1; RemovalSubmitted=1; VerifiedAbsent=0; AlreadyAbsent=0; AlreadyRemoved=0; RemovalFailed=0'
         $executionLog | Should -Match 'Actions \[Intune\]: Planned=1; Attempted=1; Removed=1'
         $executionLog | Should -Match 'Actions \[Autopilot\]: Planned=1; Attempted=1; RemovalSubmitted=1'
-        $executionLog | Should -Match 'Actions \[Entra\]: Planned=1; Attempted=1; Removed=1'
+        $executionLog | Should -Not -Match 'Actions \[Entra\]'
         $executionLog | Should -Not -Match 'Evaluated=0 Candidates=0'
         $runSummary = Get-Content -LiteralPath (Join-Path $runFolder.FullName 'RunSummary.json') -Raw | ConvertFrom-Json
         $runSummary.TotalScrappedAutopilotRemovalSubmitted | Should -Be 1
         $runSummary.TotalScrappedAutopilotVerifiedAbsent | Should -Be 0
         $runSummary.TotalScrappedIntuneDevicesRemoved | Should -Be 1
-        $runSummary.TotalScrappedEntraDevicesRemoved | Should -Be 1
-        $runSummary.TotalScrappedComplete | Should -Be 1
-        $runSummary.TotalPlannedActions | Should -Be 3
-        $runSummary.TotalAttemptedActions | Should -Be 3
-        @(Import-Csv (Join-Path $runFolder.FullName 'ActionResults.csv')).Count | Should -Be 3
+        $runSummary.TotalScrappedEntraDevicesRemoved | Should -Be 0
+        $runSummary.TotalScrappedPending | Should -Be 1
+        $runSummary.TotalPlannedActions | Should -Be 2
+        $runSummary.TotalAttemptedActions | Should -Be 2
+        @(Import-Csv (Join-Path $runFolder.FullName 'ActionResults.csv')).Count | Should -Be 2
         $runSummary.PSObject.Properties.Name | Should -Not -Contain 'DaysInactiveThreshold'
         $runSummary.PSObject.Properties.Name | Should -Not -Contain 'CutoffDateUtc'
         $runSummary.TotalErrors | Should -Be 0

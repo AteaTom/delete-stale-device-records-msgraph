@@ -1,280 +1,112 @@
-# Device deletion batching
+# Batch deletion
 
-All production deletions use the [Microsoft Graph v1.0 JSON batching
-contract](https://learn.microsoft.com/graph/json-batching): at most 20
-independent DELETE requests per envelope, not 20 physical devices. `BatchSize`
-accepts 1-20. Requests and responses are correlated by unique ID, not
-position. Outer HTTP 200 is not proof of successful removal.
+## Plans and safety
 
-## Public functions
+All destructive Graph calls use v1.0 JSON batching through
+`Invoke-MgGraphRequest`. Each envelope holds at most 20 operations, not
+necessarily 20 computers. `-BatchSize` accepts 1-20.
+[Microsoft's batch reference](https://learn.microsoft.com/graph/json-batching)
+defines per-request IDs, independent statuses and throttling.
 
-| Function | Responsibility |
+Before confirmation, the script exports reports and `DeletionPlan.json`,
+displays tenant, mode, WhatIf, unique operation counts and SHA-256 plan hash.
+The executor deep-copies and validates the approved plan. Hashes bind content,
+not approver identity; protect artifacts using filesystem access controls.
+
+| Workflow | Allowed resources and dependencies |
 | --- | --- |
-| `New-DeviceDeletionPlan` | Pure planner consuming validated records; deduplicates IDs, records Intune prerequisites and computes a SHA-256 content hash. |
-| `Invoke-DeviceDeletionPlan` | Guarded phased execution of an explicitly approved plan; returns per-object results. |
-| `Set-DeviceDeletionResults` | Fans unique-operation results back into report rows without performing Graph calls. |
-| `Test-DeviceDeletionOutcome` | Bounded read-only verification of an exact identity in the approved tenant. |
-| `Assert-DeviceCleanupContext` | Validates tenant, delegated authentication, public-cloud environment and required scopes. |
-| `Get-LatestDeviceCleanupResumeSource` | Selects one validated local original run by plan creation time; returns `Path`, `Source` and `Created`. |
-| `Read-DeviceCleanupResumeSource` | Reads the original plan, final journal and report; returns validated `Plan`, `Results`, `Records` and `Operations` indexes. |
-| `Resolve-DeviceCleanupResumeRecords` | Rechecks current inventory/protection and original Autopilot IDs read-only; returns report rows for a new Entra-only plan. |
+| Stale | Entra only |
+| Scrapped | Intune then Autopilot; Autopilot can depend only on Intune |
 
-The module includes `src\DeviceDeletionBatch.ps1` and
-`src\DeviceCleanupResume.ps1`; import the module manifest,
-not this implementation file directly. The planner is not a CSV classification
-replacement. Only the existing classification/resolution pipeline should
-supply its input. Low-level function callers must explicitly validate their
-candidates, review the plan, and supply its exact `ApprovalHash`,
-`-ConfirmDeletion` and non-Audit `Mode` before execution.
+Entra operations in a scrapped plan are rejected even with a valid content
+hash. Each envelope checks delegated context, public cloud, tenant, scopes
+and the 30-minute plan lifetime. No automatic approval renewal occurs.
+Audit/unapproved runs never submit destructive envelopes. Per-target
+ShouldProcess, WhatIf and explicit administrator intent remain required.
 
-## Workflow policy
+## Deregistration submission
 
-Stale cleanup plans only eligible Entra objects without Autopilot. Scrapped
-cleanup plans Intune removal, Windows Autopilot identity removal, then eligible
-Entra removal.
-All required Intune operations for the serial must succeed before Autopilot.
-Entra prerequisites include required Intune removals and accepted Autopilot
-DELETE responses for all associated identities. HTTP 204 permits continuation
-without read-back; HTTP 200 requires immediate verified absence as described
-below. Optional `-VerifyDeletion` runs after all
-planned DELETE operations and records absence separately from API acceptance;
-it does not gate dependent Entra targets. No arbitrary batch
-`dependsOn` graph is constructed and no serial-based `deleteDevices` action
-is used.
+Scrapped cleanup removes each unique Intune target first. Failed or declined
+prerequisites block its Autopilot identity; independent identities continue.
+There is **no Entra phase** for scrapped mode.
 
-Protection, supported client platforms, ambiguity handling and the stale
-180-day minimum are enforced before batch planning and are not changed by the
-transport.
+The [Autopilot identity DELETE reference](https://learn.microsoft.com/graph/api/intune-enrollment-windowsautopilotdeviceidentity-delete?view=graph-rest-1.0)
+documents HTTP 204. This means `RemovalSubmitted`, not completed deregistration.
+HTTP 200 is unexpected and remains `OutcomeUnknown`, with diagnostic error
+text where supplied. It causes no immediate GETs, sleeps or automatic DELETE
+retry. Autopilot completion is never polled, including with `-VerifyDeletion`.
 
-## Confirmation and durable evidence
+The next normal run reloads inventories and evaluates remaining Entra objects
+against inactivity and protection rules. Resume selectors are retired;
+historical plans/journals never bypass inactivity classification.
 
-The script writes `DeletionPlan.json` before interactive confirmation. The
-console displays the connected tenant, unique operation count and plan hash.
-Interactive still requires the exact word `DELETE`; Automatic still requires
-`-ConfirmDeletion`. Audit submits no destructive envelopes.
+## Responses, retries and verification
 
-The executor deep-copies the plan, validates its hash, workflow, IDs,
-prerequisites and age (default 30 minutes), and checks context/scopes before
-each destructive envelope. It calls `ShouldProcess` per target. Declined
-targets never become successful prerequisites. WhatIf uses the same planning
-and phase simulation, creates local journal evidence, and submits no
-destructive Graph requests. The hash binds content, not an approver's identity;
-protect the report directory using appropriate access controls.
+The outer batch HTTP 200 is not per-operation success. Subresponses are
+correlated by ID; missing, duplicate, unexpected or malformed identities fail
+closed. Authorization failures stop remaining execution. Unknown envelopes
+are journaled and never automatically replayed.
 
-`DeletionJournal.jsonl` is reserved using exclusive create-new semantics.
-Intent is persisted before submission; responses and final results are appended
-afterward. Reusing a journal is rejected rather than replaying it. It records
-tenant/run/hash, timestamp, submitted IDs, attempts, status and errors.
-Even if execution throws, final report generation reads the journal to retain
-partial outcomes. An incomplete or corrupted journal requires manual review,
-not automatic replay.
+Only identified 429/503/504 subrequests enter the bounded retry queue:
+default five attempts and 300 seconds per chunk, honoring numeric/HTTP-date
+Retry-After with exponential backoff and jitter. Permanent failures do not
+retry. SDK envelope retries are temporarily disabled and restored because an
+envelope retry could replay already completed subrequests. SDK routes remain
+relative to avoid environment mutation from absolute request URLs.
 
-## Partial failures and retries
+Entra 404 is `AlreadyAbsent`, not newly removed. Intune/Autopilot 404 is not
+silently treated as successful removal. Preserve uncertain outcomes and
+reconcile exact IDs read-only before approving a new run.
 
-Batching is not atomic. Successfully removed records are not rolled back.
-Recognized HTTP 204 is API success; Autopilot uses `RemovalSubmitted` rather
-than claiming immediate disappearance. An Autopilot HTTP 200 is not accepted
-as DELETE success: the executor immediately reads the exact identity ID.
-`VerifiedAbsent` is recorded, and dependent Entra removal may proceed, only
-when that read returns 404. If the identity remains visible or read-back
-fails, its outcome remains unresolved. These immediate checks use up to three
-exact-ID GETs with five-second intervals, without `-VerifyDeletion`. There is
-no second verification sweep during the run.
-The executor never retries that DELETE automatically. Entra 404 is
-`AlreadyAbsent`, not “deleted by this run.” Intune/Autopilot 404 is not
-silently accepted.
+`-VerifyDeletion` optionally reads successful Intune/Entra IDs up to three
+times with five-second intervals. 404 establishes `VerifiedAbsent`; continued
+visibility is `VerificationPending`; failed/denied reads are `OutcomeUnknown`.
+The verification result is separate from the DELETE outcome. Optional
+per-target verification can be slow on large Intune batches; it does not
+provide an atomic pre-delete guarantee.
 
-### Journal-based Entra resumption
+## Journal schema and recovery
 
-`-ResumeLatest` finds a source in immediate subfolders of `-OutputPath`.
-It selects the latest approved plan creation time among validated scrapped
-journals with unattempted/blocked Entra targets and Autopilot dependencies.
-Runs without journals or pending targets, and Entra-only resume runs, are
-ignored. Invalid/incomplete sources produce `ResumeSourceSkipped` warnings.
-`ResumeSourceSelected` records the selected path, original run ID and hash.
-Multiple eligible tenants require `-TenantId`; an equal latest timestamp
-requires explicit `-ResumeFromRunPath`. No matching source blocks the run
-before Graph connection. Selection does not merge runs or grant approval.
+The journal is created exclusively; an existing journal cannot be reused.
+Version 2 JSONL records contain `SchemaVersion`, timestamp, run, tenant,
+plan hash, event, submitted IDs and results:
 
-`-ResumeFromRunPath <original scrapped run folder>` validates the approved
-plan hash, matching final journal and original report targets/dependencies.
-An incomplete journal or inconsistent source is rejected. The old approval
-is evidence of the original target set, not permission to replay or bypass
-the normal plan-age limit.
+- `Approved` and `Final` contain full ordered result checkpoints.
+- `Submitting` records the affected IDs and uncertain submission intent before
+  the Graph request.
+- `Response` contains parsed outcomes for that submitted batch before optional
+  verification.
+- `Verification` contains the changed verified operation.
+- Chunk/phase/envelope-failure markers may have no result entries; the final
+  checkpoint retains the complete state, including failures and unattempted IDs.
 
-Only previously unattempted/blocked Entra operations with original Autopilot
-dependencies are considered. Successful original Intune prerequisites are
-required. Original Autopilot DELETE attempts must have returned 200/204.
-Fresh inventory and explicit protections are checked, including original
-serials still present anywhere in Intune/Autopilot inventory. Each original
-Autopilot ID must return 404 from one read-only GET. Changed/ambiguous Entra
-IDs, unsupported platforms, AD-sync protection, current management and read
-errors exclude the target. An uncertain prior Entra DELETE is never replayed.
+Do not interpret delta events as full snapshots. Finalization streams the
+journal and uses only a valid final checkpoint. It rejects malformed,
+incomplete or unsupported-schema final records rather than selecting an
+older success. Legacy unversioned full final checkpoints remain readable via
+`Read-DeviceDeletionJournal` for investigation. Interrupted runs without a final
+checkpoint require manual reconciliation, not automatic replay.
 
-Eligible IDs form a new Entra-only plan with a fresh timestamp/hash and the
-existing confirmation/WhatIf/tenant checks. No Intune or Autopilot DELETE is
-submitted. Audit remains default; Audit and WhatIf can read Graph but cannot
-delete. New reports/journal are separate; the source files remain unchanged.
-Re-supply protection options because prior command-line settings are not
-stored. Use the original scrapped run as source, not a subsequent Entra-only
-run. Original source age does not renew or reuse approval: the new Entra-only
-plan is subject to the same 30-minute limit. Resume does not use inactivity
-classification or accept `-DaysInactive`, `-ScrappedDevices` or its CSV options.
+## Operator run-validation procedure
 
-Automatic source selection does not reconcile later runs back into the
-original journal. The same source can be selected again even after successful
-resumption; absent Entra objects are then reported without new DELETE targets.
-It does not automatically move on to another original run. Review the selected
-source each time or pin it with `-ResumeFromRunPath`.
+1. Run Audit with the intended tenant, evidence directory and protections.
+   Review platform, activity, stable IDs, exclusions and exact target counts.
+2. Run WhatIf with the same workflow and settings. Confirm zero destructive
+   requests and scrapped plans containing no Entra operations.
+3. Preserve reports and evidence. Do not start overlapping destructive runs
+   or clear journals/state to bypass an error.
+4. Only with separate authorization, validate a very small set of disposable
+   lab devices (`-BatchSize 1`). Never use production candidates as test fixtures.
+5. After deregistration completes, run normal inactivity Audit, review the
+   remaining Entra candidates and obtain fresh approval.
 
-### Transient subrequest handling
-
-Only 429/503/504 subrequests enter the bounded retry queue (default five
-attempts and 300 seconds of elapsed/backoff budget per chunk). Honor
-`Retry-After`, including HTTP-date values, with exponential backoff and jitter
-as needed. A permanent failure is logged and is not retried.
-The elapsed budget is rechecked after backoff before another envelope is sent.
-Authorization failure or unexpected/missing/duplicate response identity or
-malformed response stops further execution, with authorization and response
-integrity errors reported separately. An envelope failure is `OutcomeUnknown`,
-never automatic success. For a valid Autopilot HTTP 200 response, unresolved
-read-back is retained as `OutcomeUnknown` and blocks only dependent Entra
-operations; unrelated operations can continue.
-
-The executor temporarily disables SDK envelope retries using
-[`Set-MgRequestContext -MaxRetry 0`](https://learn.microsoft.com/powershell/module/microsoft.graph.authentication/set-mgrequestcontext?view=graph-powershell-1.0)
-and restores the prior value in `finally`. Do not concurrently run other
-Graph work in the same PowerShell process while this executor is active.
-If restoring SDK retry settings fails, received per-object outcomes are still
-journaled and remaining execution stops. A restoration error does not replace
-a known DELETE response or hide an original request failure.
-Only failed, individually identified transient subrequests are re-batched.
-Lost envelope responses must be reconciled read-only before a new run.
-Batch and verification requests use relative `/v1.0/...` SDK routes.
-Absolute URLs can mutate the Graph SDK environment (observed locally with
-Authentication 2.37.0), leaving the authentication endpoint empty when
-retry configuration resets the HTTP client. This can fail a later envelope
-with `Invalid URI`; relative routes preserve the connected environment.
-See [Microsoft throttling guidance](https://learn.microsoft.com/graph/throttling#throttling-and-batching).
-
-## Optional verification
-
-`-VerifyDeletion` optionally enables bounded final verification after deletion
-phases. It is separate from dependency handling: an accepted Autopilot DELETE
-is the prerequisite for related Entra removal. Remaining successful IDs are
-read at most three times with five-second intervals. An exact-route read-back
-404 becomes `VerifiedAbsent`; continued visibility becomes
-`VerificationPending`; denied/failed reads become `OutcomeUnknown`, with a
-logged error. These are separate verification fields, not replacements for
-the original DELETE status. Verification uncertainty produces a non-success
-run outcome. Portal absence/appearance is not the API verification contract.
-
-This is not an atomic pre-delete activity recheck. Plans expire and cannot
-grow after approval, but activity can change after discovery and timestamps
-remain approximate. No rollback, universal conditional-delete guarantee, or
-automatic recovery/replay is claimed.
-
-## Rollout and validation
-
-Offline Pester tests mock Graph, including raw requests and SDK retry controls.
-Use the complete suite and repository analyzer configuration:
+Offline checks:
 
 ```powershell
-Invoke-Pester -Path '.\tests' -Output Detailed
+$result = Invoke-Pester -Path '.\tests' -Output Detailed -PassThru
+if ($result.FailedCount) { throw 'Offline suite failed.' }
 Invoke-ScriptAnalyzer -Path '.\src' -Recurse -Settings '.\PSScriptAnalyzerSettings.psd1'
 ```
 
-No live tenant behavior is established by these tests. Before production,
-explicitly validate disposable lab identities, consent/roles, exact batch
-routes, permission errors, partial outcomes, eventual consistency and
-verification. Never infer a performance multiplier from the 20-request limit.
-One envelope is in flight at a time.
-
-### Operator-run validation procedure
-
-Do not replay an interrupted plan. Preserve its plan, journal, reports and
-separate read-only reconciliation results. Historical `OutcomeUnknown`
-entries remain evidence even after a later read establishes presence.
-Current-tenant remaining candidates are not disposable validation fixtures.
-
-Start a fresh PowerShell 7 process in the feature worktree and import
-`.\src\StaleDeviceCleanup.psd1 -Force` before use. This clears SDK state from
-older absolute-URL requests. Supply an explicit tenant GUID and confirm the
-displayed tenant and delegated authentication on every run.
-
-Run fresh discovery with read scopes only:
-
-```powershell
-.\src\Invoke-StaleDeviceCleanup.ps1 -TenantId '<tenant-guid>' `
-    -Mode Audit -DaysInactive 1100 `
-    -OutputPath '.\output\batch-audit-validation'
-```
-
-Choose the inactivity threshold appropriate to the reviewed policy (never
-below 180 days). Check the candidate report, classifications, newest activity,
-protection, IDs, ISO UTC CSV dates, and agreement with the plan/summary.
-An Audit run creates no deletion journal. It requests read scopes, but an
-existing consented session may contain additional scopes.
-
-Simulate execution using the same tenant and threshold:
-
-```powershell
-.\src\Invoke-StaleDeviceCleanup.ps1 -TenantId '<tenant-guid>' `
-    -Mode Automatic -ConfirmDeletion -WhatIf -DaysInactive 1100 `
-    -BatchSize 1 `
-    -OutputPath '.\output\batch-whatif-validation'
-```
-
-Keep `-WhatIf` present: without it this command performs real deletion.
-This simulation can request write-scope consent. Require `WhatIf` outcomes,
-zero journal attempts/submitted IDs, zero removed counts and matching target
-sets (or explain changes from new discovery). It does not validate HTTP batch
-submission, server authorization, throttling or deletion verification.
-
-**Real deletion validation requires separate administrator authorization
-and disposable lab records.** Use a dedicated lab tenant whose entire eligible
-set has been reviewed. The script has no arbitrary target allowlist: if any
-candidate is not an approved disposable fixture, stop.
-
-To exercise the second-envelope fix, use at least two naturally eligible
-disposable lab Entra objects and `BatchSize 1`. Never fabricate inactivity,
-weaken the 180-day minimum or bypass protection to create fixtures. If safe
-eligible fixtures are unavailable, defer live deletion.
-
-Only the authorized operator runs the following, after reviewing a fresh lab
-Audit and WhatIf. It performs irreversible deletion:
-
-```powershell
-$beforeRetry = [int](Get-MgRequestContext).MaxRetry
-.\src\Invoke-StaleDeviceCleanup.ps1 -TenantId '<lab-tenant-guid>' `
-    -Mode Interactive -DaysInactive 180 `
-    -BatchSize 1 -VerifyDeletion -OutputPath '.\output\lab-batch-validation'
-$runExitCode = $LASTEXITCODE
-$afterRetry = [int](Get-MgRequestContext).MaxRetry
-```
-
-Review the newly displayed target set and hash before typing `DELETE`. Use
-the same agreed threshold in all lab stages. This creates a new approved
-plan, not a replay of the historical current-tenant plan.
-
-Acceptance requires at least two completed envelopes, no invalid-URI errors,
-the expected connected cloud environment remaining usable, unchanged
-`MaxRetry`, zero run errors, and matching unique operation IDs/statuses across
-the plan, journal and reports. Each successful disposable identity should
-have `VerifiedAbsent` from exact-ID read-back; HTTP 204 alone is acceptance,
-not proof of observed absence. Record the SDK version and observed evidence;
-do not interpret this small exercise as a performance benchmark.
-
-Stop on any unknown outcome, authorization error, inconsistent evidence or
-pending verification. Reconcile exact IDs read-only in the approved tenant,
-save separate results, and do not automatically replay or switch transports.
-Scrapped Intune/Autopilot dependency behavior needs its own separately
-authorized disposable Windows lab fixtures; an Entra-only exercise does not
-validate those routes. Production rollout remains a separate operator decision.
-
-Microsoft recommends a disable/grace-period policy for ordinary stale devices
-and appropriate retirement of MDM-managed devices:
-[stale-device guidance](https://learn.microsoft.com/entra/identity/devices/manage-stale-devices).
-This change does not introduce a grace-period ledger or remote wipe/retire
-actions. Ordinary standalone Entra deletion remains direct after existing
-eligibility checks; review that operational policy separately.
+Offline mocks cannot establish live Graph propagation timing or validate
+tenant consent/RBAC.
