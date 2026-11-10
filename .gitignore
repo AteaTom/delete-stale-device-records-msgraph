@@ -27,6 +27,9 @@ config/ProtectedDevices.csv
 testResults.xml
 coverage.xml
 
+# Durable tenant safety evidence (contains device identifiers; retain outside Git).
+.state/
+
 # OS / editor
 .DS_Store
 Thumbs.db

@@ -7,7 +7,9 @@
     DaysInactive               = 180
     Mode                       = 'Audit'
     BatchSize                  = 20
-    VerifyDeletion             = $false # Optional bounded read-back after batch deletion.
+    VerifyDeletion             = $false # Optional Intune/Entra read-back; never polls Autopilot.
+    # Set EvidencePath to a stable, secured absolute directory in your wrapper.
+    # The script default is repository-relative .state; retain/back up across upgrades.
     OutputPath                 = '.\output'
     TenantId                   = ''
     ProtectedDeviceIdFile      = '.\config\ProtectedDevices.example.csv'
@@ -15,4 +17,5 @@
     # For scrapped cleanup use a separate invocation with -ScrappedDevices,
     # omitting DaysInactive. Default input: config\scrappeddevices.csv in the repository.
     # Optional -ScrappedDeviceCsvPath override; strict SerialNumber header.
+    # Scrapped mode never deletes Entra. Run normal inactivity cleanup later.
 }

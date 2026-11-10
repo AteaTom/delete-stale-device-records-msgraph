@@ -9,7 +9,8 @@ $scriptPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'src/Invoke-StaleDevi
 
 # For explicit retirement replace -DaysInactive with -ScrappedDevices.
 # Default input is config\scrappeddevices.csv with a SerialNumber header.
-# Audit first; Entra deletion requires accepted related Autopilot DELETE requests.
+# Audit first. Scrapped mode retains Entra; a later normal run applies DaysInactive.
+# Reuse the same -EvidencePath across runs if overriding its repository-relative default.
 & $scriptPath `
     -Mode Interactive `
     -DaysInactive 365 `

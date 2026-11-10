@@ -1,295 +1,150 @@
 # Troubleshooting
 
-## Finding exclusions and failed actions
+## Autopilot was submitted but Entra still exists
 
-Use `ADSyncedDevices.csv` and `AutopilotProtectedDevices.csv` for the two
-dedicated protection categories. They no longer appear in `ExcludedDevices.csv`;
-the complete record remains in `AllEvaluatedDevices.csv`. A device associated
-with both follows the existing primary reason (Autopilot before AD-sync).
-`OnPremisesSyncedReview.csv` is a compatibility alias, not another category.
+This is expected. `-ScrappedDevices` now deletes Intune records and submits
+Autopilot deregistration only. It never deletes Entra or waits for Autopilot.
+Microsoft documents that deregistration can take time and may leave an Entra
+object behind. Do not delete Entra merely because submission was accepted.
 
-Use `ActionResults.csv` for unique planned operations, including their final
-outcomes, attempts, HTTP statuses and verification state. Terminal failures,
-unknown outcomes and blocked dependencies produce `Event=ActionAttention`
-warnings in `ExecutionLog.txt`. The final console/log block and
-`RunSummary.json` use the same counts; neither simulated nor already-absent
-objects count as newly removed. `RunErrors` can be nonzero even when there are
-no evaluated-device rows.
+Later, run normal inactivity Audit with the same evidence directory and
+protection settings:
 
-Successful scope lists, discovery starts and individual batch response detail
-now require `-Verbose`; DEBUG uses `-Debug`. Those streams are not duplicated
-in the normal log. The deletion journal remains the submission/retry evidence.
-See [Reporting.md](Reporting.md#administrator-logging-and-reconciliation).
+```powershell
+.\src\Invoke-StaleDeviceCleanup.ps1 -Mode Audit -DaysInactive 180
+```
 
-## Scrapped-device preparation takes a long time with CPU activity
+Review the candidate IDs and reasons, then separately approve normal cleanup.
+Autopilot-backed devices remain protected. Recent/missing activity, explicit
+protection, ambiguous state and default AD-sync protection still block deletion.
+`-ResumeLatest` and `-ResumeFromRunPath` now explicitly fail; replace scheduled
+resume commands with normal inactivity Audit first, not another scrapped run.
 
-Serial correlation and initial report generation run locally after discovery;
-they do not call Graph. Earlier versions scanned the complete Intune and
-Autopilot inventories for every input serial, including repeatedly rebuilding
-the same managed-device ID list inside the Intune scan. Plan building also
-repeatedly scanned all correlation rows. Large CSVs combined with large tenant
-inventories could therefore spend many minutes on CPU-bound preparation,
-without new log lines. CPU activity alone cannot establish that a run is
-healthy or identify its current step.
+## HTTP 200 instead of 204 from Autopilot DELETE
 
-Current code indexes stable references and groups plan rows once, while
-retaining all related records for conflict detection. It logs resolution
-progress every 100 input serials, elapsed time, and separate initial CSV
-export/plan-building boundaries. Follow `ExecutionLog.txt` with
-`Get-Content -LiteralPath '<run folder>\ExecutionLog.txt' -Wait` to distinguish
-these stages from Graph batch submission. Already-running processes continue
-using their loaded code; changing files does not accelerate that run.
-Before starting another run, preserve reports and the journal and establish
-whether any DELETE was submitted. Do not start overlapping destructive runs.
+The [API reference](https://learn.microsoft.com/graph/api/intune-enrollment-windowsautopilotdeviceidentity-delete?view=graph-rest-1.0)
+documents 204. A batch envelope's 200 is not its subrequest status.
+An individual DELETE's unexpected 200 is OutcomeUnknown, not success.
+The script records it without polling or automatically replaying the DELETE.
+Reconcile exact identity IDs read-only using the intended tenant; retain
+journals and sanitized diagnostics. Offline tests cannot explain a live
+service response.
 
-## "Missing required Microsoft Graph PowerShell module(s)"
+## Required safety evidence is missing, corrupt or locked
 
-Install the modules named in the error message, for example:
+Keep the same `-EvidencePath` across runs and back up the entire directory.
+The default is `.state` beside `src`, independent of OutputPath and the current
+working directory. It stores tenant-bound activity and serial associations.
+
+An initialized JSON missing while its lock marker remains is an error.
+Malformed/schema-mismatched evidence or failed saves also block execution.
+Restore trusted evidence; do not delete the marker or reset data to make a run
+pass. Loss of the entire directory is indistinguishable from first installation.
+When moving hosts or upgrading checkouts, explicitly point to the existing
+protected evidence directory.
+
+The exclusive tenant lock is held during execution. Wait for the existing run
+to finish; do not start an overlapping destructive run. Another tenant has a
+separate store. Lock files remain after normal completion as initialization
+markers; their existence alone does not mean a process is active.
+
+`UnresolvedSafetyEvidence` means identity/activity uncertainty, including
+historical Intune records with missing sync timestamps or changed IDs. Such
+flags intentionally persist after record removal. Investigate rather than
+clearing them automatically. Supply stable Entra IDs in protection files when
+historical serial links are unavailable. A fresh installation cannot recover
+evidence deleted before this version; review historical reports before approval.
+
+## Slow preparation or finalization
+
+Resolution runs locally after three complete inventories; indexed lookups
+avoid scanning every inventory for each serial. Logs identify resolution
+progress, export and plan-building boundaries. CPU activity alone is not proof
+of healthy progress. Already-running processes continue using their loaded code.
+
+New scrapped execution does not sleep per Autopilot identity. Optional
+`-VerifyDeletion` still performs bounded per-ID Intune read-back and can be
+slow on large Intune batches. Omit it unless needed.
+
+Version 2 journals use deltas plus full initial/final checkpoints, rather than
+full results at every event. Finalization streams giant JSONL lines instead
+of using slow `Get-Content -Tail`. Do not manually edit legacy journals.
+
+## Batch unknown outcome, plan expired or journal already exists
+
+Some operations may have completed. Preserve all artifacts and reconcile
+exact IDs read-only before another destructive run. Do not remove the journal
+and replay an envelope blindly. Expired/modified plans require new discovery,
+review and approval; plan expiry is not automatically extended.
+Unknown envelope results are never automatically retried. Only identified
+transient subrequests enter the bounded retry queue. Failed read-back is not
+evidence of absence. See [BatchDeletion.md](BatchDeletion.md).
+
+Interrupted journals without a valid Final checkpoint require manual
+reconciliation. Historical journals are evidence, not deletion authorization.
+
+## Exclusions, action counts and Pending outcomes
+
+Use ADSyncedDevices.csv and AutopilotProtectedDevices.csv for dedicated
+protection categories; remaining exclusions go to ExcludedDevices.csv.
+AllEvaluatedDevices.csv retains every normal evaluation.
+OnPremisesSyncedReview.csv is an alias, not an additional category.
+
+ActionResults.csv lists planned/attempted outcomes by unique service ID.
+Submission, newly removed, already absent, simulated and unresolved are
+different outcomes. Planned counts may exceed completed counts because of
+Audit/WhatIf, declined approval, protections, failures or unattempted work.
+Pending after accepted Autopilot deregistration is expected and can exit 0.
+OutcomeUnknown is not success. See [Reporting.md](Reporting.md).
+
+## A scrapped serial is Ambiguous or NotFound
+
+Ambiguous means insufficient stable corroboration; resolve conflicting records
+before approving. NotFound means no reliable current serial match, not proof
+that residual Entra records disappeared. Entra rows are correlation context,
+not scrapped DELETE targets. Use normal inactivity cleanup later.
+
+## Missing modules, scopes or wrong tenant
+
+Install the exact modules reported by Test-Prerequisites:
 
 ```powershell
 Install-Module -Name Microsoft.Graph.Authentication,Microsoft.Graph.Identity.DirectoryManagement,Microsoft.Graph.DeviceManagement,Microsoft.Graph.DeviceManagement.Enrollment -Scope CurrentUser
 ```
 
-## "Connected tenant '...' does not match the requested TenantId"
+Disconnect and reconnect if the authenticated tenant differs from TenantId.
+Destructive scrapped mode needs Intune and Autopilot write scopes, not Entra
+write scope. Normal deletion needs the documented delegated Entra permission
+and supported role. Audit requests read scopes only.
+See [Permissions.md](Permissions.md) for consent/RBAC/licensing.
+Failed global inventory retrieval blocks all deletions (exit 4).
 
-You authenticated to a different tenant than the one passed via `-TenantId`.
-Run `Disconnect-MgGraph` and re-run the script.
+## CSV input or old module mismatch
 
-## "Missing required Graph scope(s)"
+Use `-ScrappedDevices` without `-DaysInactive`, supply a unique SerialNumber
+column, and move real input to `config\scrappeddevices.csv` or explicitly
+override its path. No fallback to old/example files exists. Headerless input
+requires AllowLegacyScrappedDeviceFormat.
 
-The signed-in account (or the app registration behind `Connect-MgGraph`)
-was not granted one of the scopes listed in
-[Permissions.md](Permissions.md). In Audit mode this is a warning only; in
-Interactive/Automatic mode, deletion is skipped until the scopes are granted.
-
-## Run exits with code 4 (incomplete discovery)
-
-One of the three discovery calls (`Get-MgDevice`,
-`Get-MgDeviceManagementManagedDevice`,
-`Get-MgDeviceManagementWindowsAutopilotDeviceIdentity`) failed entirely. Check
-`ExecutionLog.txt` for the underlying Graph error. No deletion is attempted
-when this occurs.
-
-## Autopilot removal reported but Entra device still exists
-
-Autopilot-backed objects are protected from ordinary stale cleanup. Explicit
-`-ScrappedDevices` cleanup permits safely correlated Entra deletion only after
-all dependencies succeed: Autopilot HTTP 204 is accepted, while unexpected
-HTTP 200 requires verified absence. Do not
-delete Entra manually merely because deregistration was accepted.
-
-For `ScrappedDeviceResults.csv`, `RemovalSubmitted` means the v1.0 Autopilot
-identity DELETE accepted the removal request. Related Entra deletion may then
-proceed; optional `-VerifyDeletion` is a later diagnostic read-back and does
-not gate that dependency. The script does not wait for the portal to
-synchronize. Microsoft notes that deregistration can take time; use
-**Sync** and **Refresh** in the Intune Autopilot devices view if the record
-remains visible. `RemovalFailed` means the identity DELETE failed;
-`BlockedDependency` means a required Intune removal did not succeed.
-Entra uses `BlockedDependency` if any required operation or verification fails.
-`VerificationPending` means bounded exact-ID read-back still found the
-Autopilot record; it is not a completed cleanup. Independent targets continue.
-Preserve reports and reconcile exact IDs read-only before deciding on a new run.
-
-If an Autopilot DELETE subrequest returns HTTP 200 instead of the documented
-204, the executor does not assume success or replay the DELETE. It immediately
-checks that exact Autopilot identity: `VerifiedAbsent` means the read-back
-returned 404 and the Entra dependency may continue; a visible identity or
-failed read-back leaves the outcome unresolved and blocks dependent Entra
-deletion. The immediate check uses up to three GETs with five-second intervals;
-there is no additional sweep or automatic DELETE replay.
-
-If Autopilot disappears later but Entra remains, first preview:
-
-```powershell
-.\src\Invoke-StaleDeviceCleanup.ps1 -ResumeFromRunPath '.\output\<original-run>'
-```
-
-Then use the same source with `-Mode Interactive` for fresh approval. Re-supply
-the original protection options. This uses the approved Entra object IDs even
-when serial discovery no longer finds their links, reloads current inventory,
-and verifies the original Autopilot IDs read-only. Visible/failed read-back,
-current management or re-registration, protection and unresolved prerequisites
-still block deletion. No Intune/Autopilot DELETE is replayed.
-Missing/incomplete/inconsistent source files or a previously uncertain Entra
-DELETE require manual investigation. Keep the original run unchanged.
-
-To avoid entering the source path, use `-ResumeLatest` instead of
-`-ResumeFromRunPath`. It searches immediate subfolders of `-OutputPath`
-(default `.\output`) and logs/displays its selection. Invalid journals are
-warned about and skipped; no eligible journal is an error, not permission to
-start another cleanup workflow. If multiple tenants have eligible journals,
-specify `-TenantId`. Use an explicit source path when latest timestamps tie
-or you intend to resume a different original run.
-
-### Resume selects no journal, an older journal, or the same journal again
-
-Audit runs have no deletion journal. Latest selection also ignores Entra-only
-resume runs and sources without qualifying unattempted/blocked Entra targets.
-It uses original plan creation time, not directory name, modification time,
-or the most recent arbitrary execution. Invalid/incomplete sources are skipped
-with `ResumeSourceSkipped` warnings; review those warnings rather than deleting
-or editing evidence to make a source eligible.
-
-`-OutputPath` is the immediate-folder search root and new report destination.
-It is not a recursive search. For example, runs under `.\output\retirement`
-require that exact root. Relative paths start at the current working directory.
-Use `-ResumeFromRunPath` if the intended source is outside the root.
-
-The original journal is immutable and is not updated by later resume runs.
-It may therefore remain the latest source after successful resumption.
-Fresh inventory marks now-absent Entra targets `NotFound`/`EntraAlreadyAbsent`
-and does not delete them again. Selection does not automatically advance
-through or combine older runs. Choose an older source explicitly when needed.
-Before approving, check the displayed source path, tenant and new target IDs.
-
-### Resume excludes an expected Entra target
-
-See `AmbiguityReason` and source-linkage columns in
-`ScrappedDeviceResults.csv`, plus `ResumeTarget` and
-`ResumeAutopilotVerification` in the new log. A serial still present anywhere
-in Intune/Autopilot blocks resumption even if its device references changed.
-`AutopilotAbsenceNotVerified` covers both still-visible identities and read
-errors: HTTP 403, timeout or other failed reads are not absence.
-
-Do not remove protections or repeat earlier DELETEs to force eligibility.
-Re-supply protection options, verify the original object/device IDs, and
-investigate re-registration, sync, unsupported platforms and unresolved
-Intune prerequisites. Previously attempted Entra DELETEs are deliberately
-excluded from automatic recovery. A newly generated plan does not make an
-uncertain historical operation safe to replay.
-
-## RunSummary planned and completed removal counts differ
-
-The two Entra counts report different stages of the run:
-
-- `TotalEntraDevicesToRemove` is the planned count: evaluated candidates whose
-  `EntraAction` is `Remove`. It can be nonzero in Audit mode, with `-WhatIf`,
-  or when an execution-mode gate prevents deletion.
-- `TotalEntraDevicesRemoved` counts devices whose Entra removal completed and
-  whose `EntraRemovalStatus` is `Removed`.
-
-The completed count can therefore be lower than the planned count when no
-destructive operation was authorized, `-WhatIf` was used, discovery or
-permissions prevented deletion, an object was already absent, or an Entra
-removal failed. Check `Mode`, `WhatIfMode`, `ConfirmationGranted`,
-`DiscoveryComplete`, `ExitCode`, per-device removal statuses, and
-`ExecutionLog.txt` to see why planned removals were not completed.
-
-## Autopilot removal reports a missing bulk route
-
-Current versions use the supported individual identity DELETE endpoint. Update
-to the latest project version before retrying.
-
-## Entra devices are disabled instead of removed
-
-Direct removal is expected for an eligible standalone stale device.
-Entra device deletion is irreversible; associated BitLocker recovery keys
-must be backed up or no longer needed. `DeviceLifecycleState.json` is not a
-30-day deletion gate. Autopilot-backed objects are now excluded.
-
-`ExecutionLog.txt` records planned and completed removal counts. The same
-values are available in `RunSummary.json` as
-`TotalEntraDevicesToRemove` and `TotalEntraDevicesRemoved`.
-
-## Entra deletion reports Request_ResourceNotFound
-
-An Entra device can disappear between discovery and deletion because another
-administrator or an earlier cleanup run already removed it. Current versions
-treat Graph `404 Request_ResourceNotFound` from `Remove-MgDevice` as successful
-idempotent completion because the requested end state has already been reached.
-Other Graph errors, including permission failures, still fail the operation.
-
-## A scrapped-device serial number shows as Ambiguous or NotFound
-
-Check `ScrappedDeviceResults.csv`. `Ambiguous` means the serial number matched
-multiple records without enough corroborating stable relationships; the tool
-never guesses which one to delete,
-so nothing is removed for that serial number — resolve the duplicate manually
-in the Intune/Autopilot portal first. `NotFound` means the serial number did
-not match any Autopilot identity, Intune managed device, or Entra device
-object. Entra serial correlation depends on current Intune/Autopilot
-references. Once those source records are gone, an Entra object may remain
-but can no longer be identified by serial. Preserve earlier result reports;
-NotFound does not establish complete historical cleanup. Historical reports
-are not automatically replayed as deletion input. Use the explicit resume
-workflow with the original plan, final journal and report when applicable;
-it requires fresh validation and approval, not just a CSV.
-
-## Scrapped-device Intune removal fails with a permission error
-
-Removing an Intune managed device requires
-`DeviceManagementManagedDevices.ReadWrite.All`, which is only requested when
-`-ScrappedDevices` is supplied in a destructive mode. Entra deletion also needs
-`Directory.AccessAsUser.All` and a supported role. Re-consent if the
-account previously only had the read-only Intune scope.
-
-## Scrapped parameter binding or CSV header errors
-
-Use `-ScrappedDevices`, remove `-DaysInactive`, and supply a CSV with a unique
-`SerialNumber` column. Default input is `config\scrappeddevices.csv`, resolved
-relative to the repository containing the script. Move any existing input from
-`src` to `config`, or supply its path using `-ScrappedDeviceCsvPath`.
-The example CSV is not used automatically. Path-only invocation was intentionally removed in 1.2.0 so existing
-automation cannot silently gain Entra deletion. `-AllowLegacyScrappedDeviceFormat`
-explicitly permits the old headerless input, not the old deletion behavior.
-
-## A parameter cannot be found that matches parameter name Statistics
-
-This means an older `StaleDeviceCleanup` module is still loaded in the current
-PowerShell session while a newer script file is running. Current versions
-detect the missing scrapped-device parameters and reload the local module
-automatically. Pull the latest project files and run the command again. For an
-older checkout, start a new PowerShell session or run:
+Current scripts reload incompatible modules. For an older loaded checkout,
+start a fresh PowerShell process or explicitly import the matching manifest:
 
 ```powershell
 Remove-Module StaleDeviceCleanup -Force -ErrorAction SilentlyContinue
 Import-Module .\src\StaleDeviceCleanup.psd1 -Force
 ```
 
-## Throttling (HTTP 429)
+Graph SDK requests use relative routes to avoid earlier absolute-URI
+environment mutation. If SDK state is already damaged, preserve outcomes and
+start a fresh process for read-only reconciliation; do not assume nothing
+was deleted.
 
-`Invoke-GraphWithRetry` automatically retries transient 429/503/504 responses
-with exponential backoff (or `Retry-After` when supplied), up to 5 attempts
-by default. Persistent throttling after 5 attempts surfaces as a terminating
-error for that operation.
+## Throttling and offline tests
 
-Batch deletion separately checks every subresponse. It retries only failed transient
-subrequests, honors their Retry-After headers, and restores SDK retry settings
-after temporarily disabling envelope retries. See [BatchDeletion.md](BatchDeletion.md).
+Recognized 429/503/504 responses receive bounded retries honoring Retry-After.
+Batch retries apply only to identified failed subrequests; SDK envelope retries
+are disabled temporarily to avoid replay. Persistent failures remain visible.
 
-## Batch outcome unknown, invalid response, or journal already exists
-
-Stop and inspect `DeletionJournal.jsonl` and the final reports. Some operations
-may already have completed. Reconcile exact IDs read-only in the approved
-tenant before another destructive run. Do not delete the journal and replay
-an envelope blindly. Expired or modified plans must be regenerated and reviewed.
-Failed read-back is not evidence of absence.
-
-Once exact-ID read-only reconciliation is complete, run a new Audit rather
-than resubmitting the old plan. Compare remaining candidate IDs with historical
-unknown/unattempted IDs and investigate unexpected additions. A present
-object is not automatically authorized for deletion.
-Use the [operator validation procedure](BatchDeletion.md#operator-run-validation-procedure)
-for fresh Audit/WhatIf checks and separately authorized disposable-lab testing.
-Do not use remaining current-tenant candidates as test fixtures.
-
-### Invalid URI after the first batch
-
-Earlier batch code used absolute request URLs. Graph Authentication 2.37.0
-can leave its internal environment without an authentication endpoint after
-such a request; resetting SDK retries then exposes the invalid URI on the
-next envelope. Batch and verification code now uses relative SDK routes.
-The warning includes the underlying error.
-
-Do not assume the whole run failed without changes: inspect the journal for
-successful earlier chunks and unknown outcomes. Preserve all run artifacts.
-Start a fresh PowerShell process to clear affected SDK state and load the
-updated module before read-only reconciliation. Do not replay deletion until
-unknown outcomes have been reconciled and a new plan has been reviewed.
-
-## Pester tests fail with "Connect-MgGraph is not recognized"
-
-Tests must never call real Graph cmdlets. Ensure `Mock` is applied inside the
-correct module scope (`-ModuleName StaleDeviceCleanup`) and that the
-Microsoft.Graph modules are at least stub-importable in the test environment.
+Pester mocks every Graph operation. Missing mock/stub commands must be fixed
+in the test harness, never by connecting to a tenant. Run the full suite and
+PSScriptAnalyzer as documented in [README.md](..\README.md).

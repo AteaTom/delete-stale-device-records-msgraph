@@ -1,5 +1,9 @@
 # Dot-sourced by the *.Tests.ps1 files. Not itself a test file.
 
+$PSDefaultParameterValues['Invoke-StaleDeviceCleanup.ps1:EvidencePath'] = {
+    Join-Path $TestDrive ("evidence-" + [guid]::NewGuid().ToString('N'))
+}
+
 function New-TestEntraDevice {
     <#
         .SYNOPSIS

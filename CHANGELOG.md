@@ -6,6 +6,25 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Adopt two independent runs: `-ScrappedDevices` removes Intune records and
+  submits Autopilot deregistration only; it never deletes Entra or waits for
+  Autopilot completion, even with `-VerifyDeletion`. Normal cleanup later applies
+  `DaysInactive` (minimum 180) and all protections to residual Entra objects.
+- Retire `-ResumeLatest` / `-ResumeFromRunPath` with explicit pre-connection
+  errors and remove their Entra-deletion helpers. Historical journals remain
+  investigation evidence, not authorization to bypass inactivity checks.
+- Add tenant-scoped durable activity/serial safety evidence under `-EvidencePath`
+  (default repository-relative `.state`). Save atomically before writes, retain
+  the newest activity and serial protection associations, and fail closed on
+  missing initialized/corrupt/locked or unresolved evidence.
+- Use v2 journal delta events with full initial/final checkpoints and a streaming
+  final-record reader; retain legacy final-record readability. Preserve parsed
+  DELETE outcomes before optional Intune/Entra verification.
+- Record accepted Autopilot submissions as Pending without claiming completion.
+  Unexpected HTTP 200 remains unresolved without immediate polling or replay.
+- Replace obsolete resume-execution tests with selector-rejection, retained
+  activity/protection, two-invocation and large-batch regression coverage.
+  The intentionally removed workflow reduces the total test count.
 - Avoid repeatedly removing the front of batch queues; iterate with an offset.
   Index action-report rows by resource/object ID and reuse case-insensitive
   protection lookups without changing wildcard/ambiguity behavior. Avoid
@@ -33,21 +52,6 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
-- Explicit journal-based Entra-only resumption via `-ResumeFromRunPath`.
-  Validate original scrapped plan/hash, final journal and report; reload
-  current inventory/protection and require exact-ID Autopilot 404 read-back.
-  Generate a fresh plan requiring new approval, never replay Intune/Autopilot
-  DELETEs or uncertain previously attempted Entra operations.
-- `-ResumeLatest` local source selection under immediate `-OutputPath`
-  subfolders, ordered by original plan creation time. Warn/skip invalid
-  sources; require explicit selection for tenant/timestamp ambiguity. No
-  fallback to inactivity cleanup when no eligible journal exists.
-- Resume source-linkage report/summary fields and source-selection,
-  per-target and exact-ID verification log events. Original artifacts remain
-  unchanged; prior protection command-line options must be supplied again.
-- Offline resumption regressions for artifact integrity, tenant isolation,
-  automatic selection, re-registration/protection, approval, Audit/WhatIf,
-  Entra-only execution and output-folder collisions. No live tenant validation.
 - `ActionResults.csv` with unique planned operation outcomes and additive JSON
   reason/resource/status counts, including run-level errors.
 - Offline regressions for report partitioning, overlapping protections,
@@ -57,7 +61,7 @@ All notable changes to this project are documented in this file.
 ### Fixed
 
 - Separate the script's comment-based help from its `#Requires` directive so
-  `Get-Help -Full` renders descriptions and examples, including resume options,
+  `Get-Help -Full` renders descriptions and examples,
   rather than syntax alone.
 - Preserve existing run output on timestamp collision by adding a run-ID
   suffix rather than overwriting evidence.
